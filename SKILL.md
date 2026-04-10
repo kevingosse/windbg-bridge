@@ -1,6 +1,6 @@
 ---
 name: windbg-bridge
-description: "Connect to a live WinDbg session via the named-pipe bridge. If the bridge is not already running, use `windbg-bridge.exe launch -- [WinDbg args]` to locate Store-installed WinDbg, launch it, start the bridge, and return the pipe name."
+description: "Connect to a live WinDbg session via the named-pipe bridge. Use the pipe-name provided by the user, or use `windbg-bridge.exe launch -- [WinDbg args]` to locate Store-installed WinDbg, launch it, start the bridge, and return the pipe name."
 argument-hint: '[pipe path or pipe name] [debugging goal]'
 license: MIT
 ---
