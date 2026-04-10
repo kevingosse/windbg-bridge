@@ -25,8 +25,16 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 {
     private const int MaxLogEntries = 200;
     private const int MaxHistoryEntries = 100;
+    private const string NamedPipePathPrefix = @"\\.\pipe\";
 
+    private static readonly Regex StartupBridgeArgumentRegex = new(
+        @"(?:^|;)\s*bridgearg(?:\s+(?<value>[^;]*?))?\s*(?:;|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex StartupBridgeStartRegex = new(
+        @"(?:^|;)\s*bridgestart(?:\s+(?<value>[^;]*?))?\s*(?:;|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex DmlTagRegex = new("<[^>]+>", RegexOptions.Compiled | RegexOptions.Singleline);
+    private static readonly Regex PipeNameRegex = new("^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$", RegexOptions.Compiled);
     private static readonly Regex PromptPrefixRegex = new(@"^\s*(?<prefix>[^>\r\n]+)>", RegexOptions.Compiled);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -52,6 +60,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     private string _pipeName = string.Empty;
     private string _pipePath = string.Empty;
     private string _statusText = "Bridge not started.";
+    private string _startupCommandArgument = "Not received.";
     private bool _isRunning;
     private bool _isSubscribed;
     private int _activeConnectionCount;
@@ -111,16 +120,54 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         private set => SetProperty(ref _statusText, value);
     }
 
+    public string StartupCommandArgument
+    {
+        get => _startupCommandArgument;
+        private set => SetProperty(ref _startupCommandArgument, value);
+    }
+
+    [ClientCommand(
+        Name = "bridgearg",
+        Description = "Captures a startup test argument for the WinDbg Bridge panel.",
+        AvailableStates = EngineStates.All,
+        Options = ClientCommandOptions.NoEcho)]
+    public void CaptureStartupCommandArgument(
+        [ClientParameter(Name = "value", ConsumesRestOfCommandLine = true)] string? value)
+    {
+        SetStartupCommandArgument(value, "client command");
+    }
+
+    [ClientCommand(
+        Name = "bridgestart",
+        Description = "Starts the WinDbg Bridge with the supplied pipe name.",
+        AvailableStates = EngineStates.All,
+        Options = ClientCommandOptions.NoEcho)]
+    public void StartBridgeFromClientCommand(
+        [ClientParameter(Name = "pipeName", ConsumesRestOfCommandLine = true)] string? pipeName)
+    {
+        StartBridgeFromRequestedPipe(pipeName, "client command");
+    }
+
     public void EnsureStarted()
+        => EnsureStarted(null, "manual start");
+
+    private void EnsureStarted(string? requestedPipeName, string source)
     {
         bool startedNow = false;
+        string pipeName;
+
+        if (!TryResolvePipeName(requestedPipeName, out pipeName, out string? validationError))
+        {
+            AddLog($"{source} could not start the bridge: {validationError}");
+            return;
+        }
 
         lock (_sync)
         {
             if (!IsRunning)
             {
-                PipeName = $"windbg-bridge-{Environment.ProcessId}-{Guid.NewGuid():N}";
-                PipePath = $@"\\.\pipe\{PipeName}";
+                PipeName = pipeName;
+                PipePath = NamedPipePathPrefix + PipeName;
                 startedNow = true;
 
                 _cancellationTokenSource = new CancellationTokenSource();
@@ -134,9 +181,13 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             SetStatusText("Listening for an agent connection.");
             AddLog($"Bridge started on {PipePath}.");
         }
+        else if (string.Equals(PipeName, pipeName, StringComparison.Ordinal))
+        {
+            AddLog($"Bridge already running on {PipePath}.");
+        }
         else
         {
-            AddLog("Bridge already running.");
+            AddLog($"Bridge already running on {PipePath}; {source} requested {NamedPipePathPrefix}{pipeName}.");
         }
     }
 
@@ -155,6 +206,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         _eventBus.Subscribe<CommandExecutedEventArgs>(OnCommandExecuted);
         _eventBus.Subscribe<DmlOutputEventArgs>(OnDmlOutput);
         AddLog("Bridge command capture initialized.");
+        TryCaptureStartupCommandArgumentFromCommandLine();
+        TryStartBridgeFromCommandLine();
     }
 
     public void StopBridge()
@@ -366,6 +419,96 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
 
         dispatcher.Invoke(action);
+    }
+
+    private void TryCaptureStartupCommandArgumentFromCommandLine()
+    {
+        if (TryGetStartupCommandValue(StartupBridgeArgumentRegex, out string? value))
+        {
+            SetStartupCommandArgument(value, "command line");
+        }
+    }
+
+    private void TryStartBridgeFromCommandLine()
+    {
+        if (!TryGetStartupCommandValue(StartupBridgeStartRegex, out string? value))
+        {
+            return;
+        }
+
+        StartBridgeFromRequestedPipe(value, "startup command");
+    }
+
+    private void StartBridgeFromRequestedPipe(string? requestedPipeName, string source)
+    {
+        EnsureStarted(requestedPipeName, source);
+
+        string? displayValue = string.IsNullOrWhiteSpace(requestedPipeName) && IsRunning
+            ? PipeName
+            : requestedPipeName;
+        SetStartupCommandArgument(displayValue, source);
+    }
+
+    private static bool TryGetStartupCommandValue(Regex commandRegex, out string? value)
+    {
+        string[] args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length - 1; i++)
+        {
+            if (!string.Equals(args[i], "-c", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(args[i], "/c", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            Match match = commandRegex.Match(args[i + 1]);
+            if (!match.Success)
+            {
+                continue;
+            }
+
+            value = match.Groups["value"].Success
+                ? match.Groups["value"].Value
+                : null;
+            return true;
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static bool TryResolvePipeName(string? requestedPipeName, out string pipeName, out string? error)
+    {
+        if (string.IsNullOrWhiteSpace(requestedPipeName))
+        {
+            pipeName = $"windbg-bridge-{Environment.ProcessId}-{Guid.NewGuid():N}";
+            error = null;
+            return true;
+        }
+
+        pipeName = requestedPipeName.Trim();
+        if (pipeName.StartsWith(NamedPipePathPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            pipeName = pipeName[NamedPipePathPrefix.Length..];
+        }
+
+        if (!PipeNameRegex.IsMatch(pipeName))
+        {
+            error = "Pipe name must use only letters, digits, dot, dash, or underscore.";
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private void SetStartupCommandArgument(string? value, string source)
+    {
+        string normalizedValue = string.IsNullOrWhiteSpace(value)
+            ? "(empty)"
+            : value.Trim();
+
+        StartupCommandArgument = normalizedValue;
+        AddLog($"Startup command argument received from {source}: {normalizedValue}");
     }
 
     private void OnCommandExecuted(object? sender, CommandExecutedEventArgs args)

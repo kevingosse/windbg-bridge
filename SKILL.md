@@ -1,13 +1,13 @@
 ---
 name: windbg-bridge
-description: Connect to a live WinDbg session via a named-pipe bridge. Execute commands, read output, and see the user's command history. Use when the user says the bridge is enabled, or ask them to enable it if you need to run WinDbg commands.
-argument-hint: '[pipe path] [debugging goal]'
+description: "Connect to a live WinDbg session via the named-pipe bridge. If the bridge is not already running, use `WinDbgBridge.Cli.exe launch -- [WinDbg args]` to locate Store-installed WinDbg, launch it, start the bridge, and return the pipe name."
+argument-hint: '[pipe path or pipe name] [debugging goal]'
 license: MIT
 ---
 
 # WinDbg Bridge
 
-This skill connects you to a live WinDbg debugging session through a named-pipe bridge. The bridge is a WinDbg UI extension that the user activates from inside WinDbg.
+This skill connects you to a live WinDbg debugging session through a named-pipe bridge. The bridge can be started manually from the WinDbg tool window or automatically by using the bridge CLI to launch WinDbg for you.
 
 With the bridge active, you can:
 - **Execute WinDbg commands** — they appear in the WinDbg UI so the user sees what you're doing
@@ -16,15 +16,39 @@ With the bridge active, you can:
 
 ## Bridge workflow
 
-1. Make sure the WinDbg extension is installed and the user has started the bridge from the WinDbg tool window.
-2. Obtain the pipe path from the WinDbg bridge panel.
-3. Use the CLI to talk to the pipe:
+1. Make sure the WinDbg extension is installed.
+2. If WinDbg is not already running with the bridge enabled, launch it with the bridge CLI:
+   - `E:\git\windbg-bridge\artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe launch [-- <optional WinDbg args>]`
+3. Obtain the pipe path from the WinDbg bridge panel, or reuse the `pipeName` / `pipePath` returned by `launch`.
+4. Use the CLI to talk to the pipe:
    - `E:\git\windbg-bridge\artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe`
-4. Start with `status` to confirm the bridge is running and the pipe is correct.
-5. Use `history` for lightweight command discovery.
-6. Use `output` to retrieve the captured output for a specific history id, optionally capped with `--max-chars`.
-7. Use `execute` to send exactly one WinDbg command per CLI invocation.
-8. The CLI waits indefinitely unless you pass `--timeout <seconds>`.
+5. Start with `status` to confirm the bridge is running and the pipe is correct.
+6. Use `history` for lightweight command discovery.
+7. Use `output` to retrieve the captured output for a specific history id, optionally capped with `--max-chars`.
+8. Use `execute` to send exactly one WinDbg command per CLI invocation.
+9. The CLI waits indefinitely unless you pass `--timeout <seconds>`.
+
+### Launch WinDbg and auto-enable the bridge
+
+Use the bridge CLI when you want the agent to launch WinDbg on its own. It resolves the Store-installed WinDbg location, injects `bridgestart <pipe-name>`, waits for the bridge to come up, and prints JSON with `pipeName`, `pipePath`, `processId`, and `winDbgPath`.
+
+```powershell
+WinDbgBridge.Cli.exe launch
+```
+
+Launch with your own deterministic pipe name:
+
+```powershell
+WinDbgBridge.Cli.exe launch --pipe windbg-bridge-demo
+```
+
+Launch and forward extra WinDbg arguments after `--`:
+
+```powershell
+WinDbgBridge.Cli.exe launch -- -z C:\dumps\app.dmp
+```
+
+The supplied pipe name can be either `windbg-bridge-demo` or `\\.\pipe\windbg-bridge-demo`. Use only letters, digits, `.`, `_`, and `-`. If you pass a WinDbg `-c` argument, the CLI prepends `bridgestart <pipe-name>` to it automatically.
 
 ## Commands
 
