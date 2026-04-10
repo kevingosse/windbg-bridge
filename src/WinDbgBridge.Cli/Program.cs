@@ -62,7 +62,8 @@ internal static class Program
                 Text = options.Text,
                 Count = options.Count,
                 Id = options.Id,
-                MaxChars = options.MaxChars
+                MaxChars = options.MaxChars,
+                Stream = options.StreamExecuteOutput
             };
 
             string serializedRequest = JsonSerializer.Serialize(request, JsonOptions);
@@ -73,24 +74,9 @@ internal static class Program
 
             writer.WriteLine(serializedRequest);
 
-            string? responseText = ReadLineWithTimeout(reader, options.TimeoutSeconds);
-            if (options.Verbose && responseText is not null)
-            {
-                Console.Error.WriteLine("Received response: " + responseText);
-            }
-
-            if (string.IsNullOrWhiteSpace(responseText))
-            {
-                throw new InvalidOperationException("The bridge returned an empty response.");
-            }
-
-            BridgeResponse? response = JsonSerializer.Deserialize<BridgeResponse>(responseText, JsonOptions);
-            if (response is null)
-            {
-                throw new InvalidOperationException("The bridge returned an invalid response.");
-            }
-
-            return WriteResponse(options.Operation, response);
+            return options.Operation == "execute" && options.StreamExecuteOutput
+                ? WriteExecuteResponses(reader, options.TimeoutSeconds, options.Verbose)
+                : WriteSingleResponse(reader, options.Operation, options.TimeoutSeconds, options.Verbose);
         }
         catch (OperationCanceledException)
         {
@@ -126,7 +112,57 @@ internal static class Program
             : throw new OperationCanceledException();
     }
 
-    private static int WriteResponse(string operation, BridgeResponse response)
+    private static BridgeResponse ReadResponse(StreamReader reader, int? timeoutSeconds, bool verbose)
+    {
+        string? responseText = ReadLineWithTimeout(reader, timeoutSeconds);
+        if (verbose && responseText is not null)
+        {
+            Console.Error.WriteLine("Received response: " + responseText);
+        }
+
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            throw new InvalidOperationException("The bridge returned an empty response.");
+        }
+
+        BridgeResponse? response = JsonSerializer.Deserialize<BridgeResponse>(responseText, JsonOptions);
+        if (response is null)
+        {
+            throw new InvalidOperationException("The bridge returned an invalid response.");
+        }
+
+        return response;
+    }
+
+    private static int WriteExecuteResponses(StreamReader reader, int? timeoutSeconds, bool verbose)
+    {
+        bool streamedOutput = false;
+
+        while (true)
+        {
+            BridgeResponse response = ReadResponse(reader, timeoutSeconds, verbose);
+            if (string.Equals(response.Event, "output", StringComparison.Ordinal))
+            {
+                if (!string.IsNullOrEmpty(response.Output))
+                {
+                    Console.Write(response.Output);
+                    streamedOutput = true;
+                }
+
+                continue;
+            }
+
+            return WriteResponse("execute", response, suppressExecuteOutput: streamedOutput);
+        }
+    }
+
+    private static int WriteSingleResponse(StreamReader reader, string operation, int? timeoutSeconds, bool verbose)
+    {
+        BridgeResponse response = ReadResponse(reader, timeoutSeconds, verbose);
+        return WriteResponse(operation, response);
+    }
+
+    private static int WriteResponse(string operation, BridgeResponse response, bool suppressExecuteOutput = false)
     {
         if (!response.Success)
         {
@@ -137,7 +173,7 @@ internal static class Program
         switch (operation)
         {
             case "execute":
-                if (!string.IsNullOrEmpty(response.Output))
+                if (!suppressExecuteOutput && !string.IsNullOrEmpty(response.Output))
                 {
                     Console.Write(response.Output);
                 }
@@ -180,6 +216,8 @@ internal static class Program
         public int? TimeoutSeconds { get; init; }
 
         public bool Verbose { get; init; }
+
+        public bool StreamExecuteOutput { get; init; }
 
         public static ClientOptions Parse(string[] args)
         {
@@ -328,7 +366,8 @@ internal static class Program
                 Id = id,
                 MaxChars = maxChars,
                 TimeoutSeconds = timeoutSeconds,
-                Verbose = args.Any(arg => arg is "--verbose" or "-v")
+                Verbose = args.Any(arg => arg is "--verbose" or "-v"),
+                StreamExecuteOutput = operation == "execute"
             };
         }
     }
@@ -345,6 +384,8 @@ internal sealed class BridgeRequest
     public long? Id { get; set; }
 
     public int? MaxChars { get; set; }
+
+    public bool? Stream { get; set; }
 }
 
 internal sealed class BridgeResponse
@@ -366,6 +407,8 @@ internal sealed class BridgeResponse
     public bool? Truncated { get; set; }
 
     public int? TotalLength { get; set; }
+
+    public string? Event { get; set; }
 }
 
 internal sealed class BridgeStatus

@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using System.Windows;
 using DbgX.Interfaces;
 using DbgX.Interfaces.Events;
@@ -306,8 +307,13 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 
             AddLog("RX " + line);
 
-            BridgeResponse response = await ProcessRequestAsync(line, cancellationToken);
-            await writer.WriteLineAsync(JsonSerializer.Serialize(response, JsonOptions));
+            Task WriteResponseAsync(BridgeResponse response)
+            {
+                return writer.WriteLineAsync(JsonSerializer.Serialize(response, JsonOptions));
+            }
+
+            BridgeResponse response = await ProcessRequestAsync(line, cancellationToken, WriteResponseAsync);
+            await WriteResponseAsync(response);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -354,28 +360,55 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             _activeCommand = new CapturedCommand(
                 args.Command,
                 pendingAgentCommand is null ? "user" : "agent",
-                pendingAgentCommand?.CompletionSource);
+                pendingAgentCommand?.CompletionSource,
+                pendingAgentCommand?.OutputWriter);
         }
     }
 
     private void OnDmlOutput(object? sender, DmlOutputEventArgs args)
     {
-        if (!args.IsCommandCompletion)
-        {
-            lock (_sync)
-            {
-                _activeCommand?.RawOutput.Append(args.Dml);
-            }
-
-            return;
-        }
-
         CapturedCommand? completedCommand;
+        ChannelWriter<string>? outputWriter = null;
+        string? outputChunk = null;
 
         lock (_sync)
         {
-            completedCommand = _activeCommand;
-            _activeCommand = null;
+            if (_activeCommand is null)
+            {
+                return;
+            }
+
+            _activeCommand.RawOutput.Append(args.Dml);
+            if (_activeCommand.OutputWriter is not null)
+            {
+                string normalizedOutput = StripDml(_activeCommand.RawOutput.ToString());
+                if (normalizedOutput.Length > _activeCommand.StreamedOutputLength)
+                {
+                    outputChunk = normalizedOutput[_activeCommand.StreamedOutputLength..];
+                    _activeCommand.StreamedOutputLength = normalizedOutput.Length;
+                    outputWriter = _activeCommand.OutputWriter;
+                }
+            }
+
+            if (!args.IsCommandCompletion)
+            {
+                completedCommand = null;
+            }
+            else
+            {
+                completedCommand = _activeCommand;
+                _activeCommand = null;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(outputChunk))
+        {
+            outputWriter?.TryWrite(outputChunk);
+        }
+
+        if (!args.IsCommandCompletion)
+        {
+            return;
         }
 
         if (completedCommand is null)
@@ -398,9 +431,13 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 
         AddHistory(entry);
         completedCommand.CompletionSource?.TrySetResult(entry);
+        completedCommand.OutputWriter?.TryComplete();
     }
 
-    private async Task<BridgeResponse> ProcessRequestAsync(string requestText, CancellationToken cancellationToken)
+    private async Task<BridgeResponse> ProcessRequestAsync(
+        string requestText,
+        CancellationToken cancellationToken,
+        Func<BridgeResponse, Task> writeResponseAsync)
     {
         BridgeRequest? request;
 
@@ -472,29 +509,43 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     return BuildErrorResponse(command, "The execute command requires text.");
                 }
 
-                PendingAgentCommand pendingCommand = new(request.Text);
+                bool streamOutput = request.Stream == true;
+                PendingAgentCommand pendingCommand = new(request.Text, streamOutput);
 
                 lock (_sync)
                 {
                     _pendingAgentCommands.Enqueue(pendingCommand);
                 }
 
+                Task executeTask = Task.CompletedTask;
+                Task streamTask = Task.CompletedTask;
+
                 try
                 {
-                    await InvokeOnUiThreadAsync(() => _console.ExecuteCommandAsync(request.Text, forceUseEngine: false));
+                    executeTask = InvokeOnUiThreadAsync(() => _console.ExecuteCommandAsync(request.Text, forceUseEngine: false));
+                    if (streamOutput)
+                    {
+                        streamTask = StreamAgentOutputAsync(command, pendingCommand, writeResponseAsync, cancellationToken);
+                    }
+
+                    await executeTask;
                     BridgeHistoryRecord completedCommand = await pendingCommand.CompletionSource.Task.WaitAsync(cancellationToken);
+                    await streamTask;
 
                     return new BridgeResponse
                     {
                         Success = true,
                         Command = command,
+                        Event = streamOutput ? "completed" : null,
                         Id = completedCommand.Id,
-                        Output = completedCommand.Output
+                        Output = streamOutput ? null : completedCommand.Output
                     };
                 }
                 catch (Exception ex)
                 {
                     RemovePendingCommand(pendingCommand);
+                    pendingCommand.CompleteOutput();
+                    await streamTask;
                     AddLog("Command failed: " + ex.Message);
                     return BuildErrorResponse(command, ex.Message);
                 }
@@ -509,6 +560,38 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         lock (_sync)
         {
             return _history.LastOrDefault(entry => entry.Id == id);
+        }
+    }
+
+    private static async Task StreamAgentOutputAsync(
+        string command,
+        PendingAgentCommand pendingCommand,
+        Func<BridgeResponse, Task> writeResponseAsync,
+        CancellationToken cancellationToken)
+    {
+        ChannelReader<string>? outputReader = pendingCommand.OutputReader;
+        if (outputReader is null)
+        {
+            return;
+        }
+
+        while (await outputReader.WaitToReadAsync(cancellationToken))
+        {
+            while (outputReader.TryRead(out string? chunk))
+            {
+                if (string.IsNullOrEmpty(chunk))
+                {
+                    continue;
+                }
+
+                await writeResponseAsync(new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Event = "output",
+                    Output = chunk
+                });
+            }
         }
     }
 
@@ -718,6 +801,8 @@ internal sealed class BridgeRequest
     public long? Id { get; set; }
 
     public int? MaxChars { get; set; }
+
+    public bool? Stream { get; set; }
 }
 
 internal sealed class BridgeResponse
@@ -739,6 +824,8 @@ internal sealed class BridgeResponse
     public bool? Truncated { get; init; }
 
     public int? TotalLength { get; init; }
+
+    public string? Event { get; init; }
 }
 
 internal sealed class BridgeStatus
@@ -789,32 +876,56 @@ internal sealed class CapturedCommand
     public CapturedCommand(
         string command,
         string source,
-        TaskCompletionSource<BridgeHistoryRecord>? completionSource)
+        TaskCompletionSource<BridgeHistoryRecord>? completionSource,
+        ChannelWriter<string>? outputWriter)
     {
         Command = command;
         Source = source;
         CompletionSource = completionSource;
+        OutputWriter = outputWriter;
     }
 
     public string Command { get; }
 
     public TaskCompletionSource<BridgeHistoryRecord>? CompletionSource { get; }
 
+    public ChannelWriter<string>? OutputWriter { get; }
+
     public StringBuilder RawOutput { get; } = new();
+
+    public int StreamedOutputLength { get; set; }
 
     public string Source { get; }
 }
 
 internal sealed class PendingAgentCommand
 {
-    public PendingAgentCommand(string command)
+    public PendingAgentCommand(string command, bool streamOutput)
     {
         Command = command;
+        _outputChannel = streamOutput
+            ? Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false
+            })
+            : null;
     }
+
+    private readonly Channel<string>? _outputChannel;
 
     public string Command { get; }
 
     public TaskCompletionSource<BridgeHistoryRecord> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public ChannelReader<string>? OutputReader => _outputChannel?.Reader;
+
+    public ChannelWriter<string>? OutputWriter => _outputChannel?.Writer;
+
+    public void CompleteOutput()
+    {
+        _outputChannel?.Writer.TryComplete();
+    }
 }
 
 internal readonly record struct OutputSlice(string Text, bool WasTruncated);

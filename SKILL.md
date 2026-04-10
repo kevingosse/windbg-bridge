@@ -26,8 +26,6 @@ With the bridge active, you can:
 7. Use `execute` to send exactly one WinDbg command per CLI invocation.
 8. The CLI waits indefinitely unless you pass `--timeout <seconds>`.
 
-If the published CLI is missing or stale, run `install.ps1` from the repository root to publish the extension and CLI artifacts.
-
 ## Commands
 
 ### Status
