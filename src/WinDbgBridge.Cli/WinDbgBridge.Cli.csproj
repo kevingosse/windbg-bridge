@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>WinDbgBridge.Cli</RootNamespace>
-    <AssemblyName>WinDbgBridge.Cli</AssemblyName>
+    <AssemblyName>windbg-bridge</AssemblyName>
   </PropertyGroup>
 
 </Project>

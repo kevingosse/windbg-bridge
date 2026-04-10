@@ -1,6 +1,6 @@
 ---
 name: windbg-bridge
-description: "Connect to a live WinDbg session via the named-pipe bridge. If the bridge is not already running, use `WinDbgBridge.Cli.exe launch -- [WinDbg args]` to locate Store-installed WinDbg, launch it, start the bridge, and return the pipe name."
+description: "Connect to a live WinDbg session via the named-pipe bridge. If the bridge is not already running, use `windbg-bridge.exe launch -- [WinDbg args]` to locate Store-installed WinDbg, launch it, start the bridge, and return the pipe name."
 argument-hint: '[pipe path or pipe name] [debugging goal]'
 license: MIT
 ---
@@ -18,10 +18,10 @@ With the bridge active, you can:
 
 1. Make sure the WinDbg extension is installed.
 2. If WinDbg is not already running with the bridge enabled, launch it with the bridge CLI:
-   - `E:\git\windbg-bridge\artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe launch [-- <optional WinDbg args>]`
+   - `E:\git\windbg-bridge\artifacts\publish\windbg-bridge\Release\windbg-bridge.exe launch [-- <optional WinDbg args>]`
 3. Obtain the pipe path from the WinDbg bridge panel, or reuse the `pipeName` / `pipePath` returned by `launch`.
 4. Use the CLI to talk to the pipe:
-   - `E:\git\windbg-bridge\artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe`
+   - `E:\git\windbg-bridge\artifacts\publish\windbg-bridge\Release\windbg-bridge.exe`
 5. Start with `status` to confirm the bridge is running and the pipe is correct.
 6. Use `history` for lightweight command discovery.
 7. Use `output` to retrieve the captured output for a specific history id, optionally capped with `--max-chars`.
@@ -33,19 +33,19 @@ With the bridge active, you can:
 Use the bridge CLI when you want the agent to launch WinDbg on its own. It resolves the Store-installed WinDbg location, injects `bridgestart <pipe-name>`, waits for the bridge to come up, and prints JSON with `pipeName`, `pipePath`, `processId`, and `winDbgPath`.
 
 ```powershell
-WinDbgBridge.Cli.exe launch
+windbg-bridge.exe launch
 ```
 
 Launch with your own deterministic pipe name:
 
 ```powershell
-WinDbgBridge.Cli.exe launch --pipe windbg-bridge-demo
+windbg-bridge.exe launch --pipe windbg-bridge-demo
 ```
 
 Launch and forward extra WinDbg arguments after `--`:
 
 ```powershell
-WinDbgBridge.Cli.exe launch -- -z C:\dumps\app.dmp
+windbg-bridge.exe launch -- -z C:\dumps\app.dmp
 ```
 
 The supplied pipe name can be either `windbg-bridge-demo` or `\\.\pipe\windbg-bridge-demo`. Use only letters, digits, `.`, `_`, and `-`. If you pass a WinDbg `-c` argument, the CLI prepends `bridgestart <pipe-name>` to it automatically.
@@ -57,7 +57,7 @@ The supplied pipe name can be either `windbg-bridge-demo` or `\\.\pipe\windbg-br
 Use this first to confirm the bridge is live.
 
 ```powershell
-WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 status
+windbg-bridge.exe --pipe \\.\pipe\windbg-bridge-123 status
 ```
 
 ### History
@@ -72,7 +72,7 @@ WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 status
 It intentionally does **not** include full command output.
 
 ```powershell
-WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 history --count 20
+windbg-bridge.exe --pipe \\.\pipe\windbg-bridge-123 history --count 20
 ```
 
 ### Output
@@ -80,7 +80,7 @@ WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 history --count 20
 Use `output` when you need the text for a specific history entry. Prefer `--max-chars` unless you truly need the full output.
 
 ```powershell
-WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 output --id 42 --max-chars 4000
+windbg-bridge.exe --pipe \\.\pipe\windbg-bridge-123 output --id 42 --max-chars 4000
 ```
 
 ### Execute
@@ -88,7 +88,7 @@ WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 output --id 42 --max-char
 `execute` sends one WinDbg command. Agent-triggered commands are submitted as typed commands so they should appear in WinDbg like normal user input.
 
 ```powershell
-WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 execute "!clrstack"
+windbg-bridge.exe --pipe \\.\pipe\windbg-bridge-123 execute "!clrstack"
 ```
 
 ## Important behaviors

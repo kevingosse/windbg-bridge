@@ -540,18 +540,18 @@ internal static class Program
                     case "-h":
                         throw new InvalidOperationException(
                             "Usage:\n" +
-                            "  WinDbgBridge.Cli --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
-                            "  WinDbgBridge.Cli launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
+                            "  windbg-bridge.exe --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
+                            "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
                             "If --timeout is omitted for bridge commands, the client waits indefinitely.\n" +
                             "If --timeout is omitted for launch, the client waits up to 30 seconds for the bridge to come up.\n" +
                             "Examples:\n" +
-                            "  WinDbgBridge.Cli --pipe windbg-bridge-123 status\n" +
-                            "  WinDbgBridge.Cli --pipe windbg-bridge-123 execute !clrstack\n" +
-                            "  WinDbgBridge.Cli --pipe windbg-bridge-123 history --count 10\n" +
-                            "  WinDbgBridge.Cli --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
-                            "  WinDbgBridge.Cli launch\n" +
-                            "  WinDbgBridge.Cli launch --pipe windbg-bridge-demo -- -z C:\\dumps\\app.dmp\n" +
-                            "  WinDbgBridge.Cli launch -- --server tcp:port=5005");
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 status\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 execute !clrstack\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 history --count 10\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
+                            "  windbg-bridge.exe launch\n" +
+                            "  windbg-bridge.exe launch --pipe windbg-bridge-demo -- -z C:\\dumps\\app.dmp\n" +
+                            "  windbg-bridge.exe launch -- --server tcp:port=5005");
 
                     case "--verbose":
                     case "-v":
@@ -703,13 +703,13 @@ internal static class Program
                     case "--help":
                     case "-h":
                         throw new InvalidOperationException(
-                            "Usage: WinDbgBridge.Cli launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
+                            "Usage: windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
                             "Launches WinDbg, injects `bridgestart <pipe-name>`, waits for the bridge to become ready, and prints launch metadata as JSON.\n" +
                             "Examples:\n" +
-                            "  WinDbgBridge.Cli launch\n" +
-                            "  WinDbgBridge.Cli launch --pipe windbg-bridge-demo\n" +
-                            "  WinDbgBridge.Cli launch -- -z C:\\dumps\\app.dmp\n" +
-                            "  WinDbgBridge.Cli launch --timeout 60 -- --server tcp:port=5005");
+                            "  windbg-bridge.exe launch\n" +
+                            "  windbg-bridge.exe launch --pipe windbg-bridge-demo\n" +
+                            "  windbg-bridge.exe launch -- -z C:\\dumps\\app.dmp\n" +
+                            "  windbg-bridge.exe launch --timeout 60 -- --server tcp:port=5005");
 
                     default:
                         throw new InvalidOperationException(

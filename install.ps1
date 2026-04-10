@@ -16,7 +16,7 @@ $repoRoot = Split-Path -Path $MyInvocation.MyCommand.Path -Parent
 $projectPath = Join-Path $repoRoot "src\WinDbgBridge\WinDbgBridge.csproj"
 $clientProjectPath = Join-Path $repoRoot "src\WinDbgBridge.Cli\WinDbgBridge.Cli.csproj"
 $publishDir = Join-Path $repoRoot "artifacts\publish\WinDbgBridge\$Configuration"
-$clientPublishDir = Join-Path $repoRoot "artifacts\publish\WinDbgBridge.Cli\$Configuration"
+$clientPublishDir = Join-Path $repoRoot "artifacts\publish\windbg-bridge\$Configuration"
 
 if ([string]::IsNullOrWhiteSpace($ExtensionDir)) {
     $ExtensionDir = Join-Path $env:LOCALAPPDATA "DBG\UIExtensions"
@@ -51,7 +51,7 @@ if (-not [string]::IsNullOrWhiteSpace($WindbgXDir)) {
 Write-Host "Publishing WinDbgBridge..."
 & dotnet @publishArgs
 
-Write-Host "Publishing WinDbgBridge.Cli..."
+Write-Host "Publishing windbg-bridge..."
 & dotnet @clientPublishArgs
 
 $mainAssembly = Join-Path $publishDir "WinDbgBridge.dll"
@@ -87,4 +87,4 @@ Get-ChildItem -Path $ExtensionDir -File | Where-Object { $_.Name -like "WinDbgBr
 
 Write-Host ""
 Write-Host "WinDbgBridge installed to $ExtensionDir"
-Write-Host "WinDbgBridge.Cli published to $clientPublishDir"
+Write-Host "windbg-bridge published to $clientPublishDir"
