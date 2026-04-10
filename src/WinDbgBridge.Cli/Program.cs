@@ -32,7 +32,14 @@ internal static class Program
 
             using NamedPipeClientStream client = new(".", NormalizePipeName(options.Pipe), PipeDirection.InOut);
 
-            client.Connect(options.TimeoutSeconds * 1000);
+            if (options.TimeoutSeconds is int timeoutSeconds)
+            {
+                client.Connect(timeoutSeconds * 1000);
+            }
+            else
+            {
+                client.Connect();
+            }
 
             if (options.Verbose)
             {
@@ -106,10 +113,15 @@ internal static class Program
             : pipe;
     }
 
-    private static string? ReadLineWithTimeout(StreamReader reader, int timeoutSeconds)
+    private static string? ReadLineWithTimeout(StreamReader reader, int? timeoutSeconds)
     {
+        if (timeoutSeconds is null)
+        {
+            return reader.ReadLine();
+        }
+
         Task<string?> task = Task.Run(reader.ReadLine);
-        return task.Wait(TimeSpan.FromSeconds(timeoutSeconds))
+        return task.Wait(TimeSpan.FromSeconds(timeoutSeconds.Value))
             ? task.Result
             : throw new OperationCanceledException();
     }
@@ -165,7 +177,7 @@ internal static class Program
 
         public int? MaxChars { get; init; }
 
-        public int TimeoutSeconds { get; init; } = 10;
+        public int? TimeoutSeconds { get; init; }
 
         public bool Verbose { get; init; }
 
@@ -176,7 +188,7 @@ internal static class Program
             int? count = null;
             long? id = null;
             int? maxChars = null;
-            int timeoutSeconds = 10;
+            int? timeoutSeconds = null;
             List<string> positional = new();
 
             for (int i = 0; i < args.Length; i++)
@@ -195,11 +207,12 @@ internal static class Program
 
                     case "--timeout":
                     case "-t":
-                        if (i + 1 >= args.Length || !int.TryParse(args[++i], out timeoutSeconds) || timeoutSeconds <= 0)
+                        if (i + 1 >= args.Length || !int.TryParse(args[++i], out int parsedTimeoutSeconds) || parsedTimeoutSeconds <= 0)
                         {
                             throw new InvalidOperationException("Timeout must be a positive integer.");
                         }
 
+                        timeoutSeconds = parsedTimeoutSeconds;
                         break;
 
                     case "--count":
@@ -235,7 +248,8 @@ internal static class Program
                     case "--help":
                     case "-h":
                         throw new InvalidOperationException(
-                            "Usage: WinDbgBridge.Cli --pipe <pipe-name-or-path> [--verbose] <command> [arguments]\n" +
+                            "Usage: WinDbgBridge.Cli --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
+                            "If --timeout is omitted, the client waits indefinitely.\n" +
                             "Examples:\n" +
                             "  WinDbgBridge.Cli --pipe windbg-bridge-123 status\n" +
                             "  WinDbgBridge.Cli --pipe windbg-bridge-123 execute !clrstack\n" +

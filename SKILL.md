@@ -1,7 +1,7 @@
 ---
 name: windbg-bridge
 description: Connect to a live WinDbg session via a named-pipe bridge. Execute commands, read output, and see the user's command history. Use when the user says the bridge is enabled, or ask them to enable it if you need to run WinDbg commands.
-argument-hint: [pipe path] [debugging goal]
+argument-hint: '[pipe path] [debugging goal]'
 license: MIT
 ---
 
@@ -18,12 +18,13 @@ With the bridge active, you can:
 
 1. Make sure the WinDbg extension is installed and the user has started the bridge from the WinDbg tool window.
 2. Obtain the pipe path from the WinDbg bridge panel.
-3. Use the published CLI from this repository to talk to the pipe:
-   - `artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe`
+3. Use the CLI to talk to the pipe:
+   - `E:\git\windbg-bridge\artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe`
 4. Start with `status` to confirm the bridge is running and the pipe is correct.
 5. Use `history` for lightweight command discovery.
 6. Use `output` to retrieve the captured output for a specific history id, optionally capped with `--max-chars`.
 7. Use `execute` to send exactly one WinDbg command per CLI invocation.
+8. The CLI waits indefinitely unless you pass `--timeout <seconds>`.
 
 If the published CLI is missing or stale, run `install.ps1` from the repository root to publish the extension and CLI artifacts.
 
@@ -34,7 +35,7 @@ If the published CLI is missing or stale, run `install.ps1` from the repository 
 Use this first to confirm the bridge is live.
 
 ```powershell
-artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 status
+WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 status
 ```
 
 ### History
@@ -49,7 +50,7 @@ artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\
 It intentionally does **not** include full command output.
 
 ```powershell
-artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 history --count 20
+WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 history --count 20
 ```
 
 ### Output
@@ -57,7 +58,7 @@ artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\
 Use `output` when you need the text for a specific history entry. Prefer `--max-chars` unless you truly need the full output.
 
 ```powershell
-artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 output --id 42 --max-chars 4000
+WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 output --id 42 --max-chars 4000
 ```
 
 ### Execute
@@ -65,7 +66,7 @@ artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\
 `execute` sends one WinDbg command. Agent-triggered commands are submitted as typed commands so they should appear in WinDbg like normal user input.
 
 ```powershell
-artifacts\publish\WinDbgBridge.Cli\Release\WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 execute "!clrstack"
+WinDbgBridge.Cli.exe --pipe \\.\pipe\windbg-bridge-123 execute "!clrstack"
 ```
 
 ## Important behaviors

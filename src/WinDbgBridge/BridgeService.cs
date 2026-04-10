@@ -67,6 +67,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 
     public DelegateCommand CopyPromptCommand { get; }
 
+    public ObservableCollection<string> LogEntries => _logEntries;
+
     public bool IsRunning
     {
         get => _isRunning;
@@ -309,10 +311,6 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-        }
-        catch (IOException)
-        {
-            AddLog("Agent connection closed.");
         }
     }
 
@@ -567,16 +565,33 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                using NamedPipeServerStream server = CreatePipeServer(pipeName);
-                await server.WaitForConnectionAsync(cancellationToken);
+                bool clientConnected = false;
 
-                UpdateActiveConnections(1);
-                SetStatusText("Agent connected.");
-                AddLog("Agent connected.");
+                try
+                {
+                    using NamedPipeServerStream server = CreatePipeServer(pipeName);
+                    await server.WaitForConnectionAsync(cancellationToken);
 
-                await HandleClientAsync(server, cancellationToken);
+                    clientConnected = true;
+                    UpdateActiveConnections(1);
+                    SetStatusText("Agent connected.");
+                    AddLog("Agent connected.");
 
-                UpdateActiveConnections(-1);
+                    await HandleClientAsync(server, cancellationToken);
+                }
+                catch (IOException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    AddLog(IsDisconnectedPipe(ex)
+                        ? "Agent connection closed."
+                        : "The agent connection failed: " + ex.Message);
+                }
+                finally
+                {
+                    if (clientConnected)
+                    {
+                        UpdateActiveConnections(-1);
+                    }
+                }
 
                 if (!cancellationToken.IsCancellationRequested)
                 {
@@ -591,10 +606,6 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         catch (UnauthorizedAccessException ex)
         {
             AddLog("The named pipe could not be created: " + ex.Message);
-        }
-        catch (IOException ex)
-        {
-            AddLog("The named pipe listener stopped: " + ex.Message);
         }
         finally
         {
@@ -618,6 +629,12 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     private void SetStatusText(string statusText)
     {
         InvokeOnUiThread(() => StatusText = statusText);
+    }
+
+    private static bool IsDisconnectedPipe(IOException ex)
+    {
+        int win32Error = ex.HResult & 0xFFFF;
+        return win32Error is 109 or 232 or 233;
     }
 
     private static OutputSlice SliceOutput(string text, int? maxChars)
