@@ -61,12 +61,15 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     public BridgeService()
     {
         StartBridgeCommand = new DelegateCommand(EnsureStarted, () => !IsRunning);
-        CopyPromptCommand = new DelegateCommand(CopyPromptToClipboard, () => IsRunning);
+        StopBridgeCommand = new DelegateCommand(StopBridge, () => IsRunning);
+        CopyPipeNameCommand = new DelegateCommand(CopyPipeNameToClipboard, () => IsRunning && !string.IsNullOrWhiteSpace(PipeName));
     }
 
     public DelegateCommand StartBridgeCommand { get; }
 
-    public DelegateCommand CopyPromptCommand { get; }
+    public DelegateCommand StopBridgeCommand { get; }
+
+    public DelegateCommand CopyPipeNameCommand { get; }
 
     public ObservableCollection<string> LogEntries => _logEntries;
 
@@ -78,7 +81,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             if (SetProperty(ref _isRunning, value))
             {
                 StartBridgeCommand.RaiseCanExecuteChanged();
-                CopyPromptCommand.RaiseCanExecuteChanged();
+                StopBridgeCommand.RaiseCanExecuteChanged();
+                CopyPipeNameCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -90,7 +94,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         {
             if (SetProperty(ref _pipeName, value))
             {
-                OnPropertyChanged(nameof(PromptText));
+                CopyPipeNameCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -98,18 +102,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     public string PipePath
     {
         get => _pipePath;
-        private set
-        {
-            if (SetProperty(ref _pipePath, value))
-            {
-                OnPropertyChanged(nameof(PromptText));
-            }
-        }
+        private set => SetProperty(ref _pipePath, value);
     }
-
-    public string PromptText => string.IsNullOrWhiteSpace(PipePath)
-        ? "Start the bridge to generate a named pipe prompt."
-        : $"The WinDbg bridge is listening on {PipePath}. Connect to that Windows named pipe to talk to this debugging session.";
 
     public string StatusText
     {
@@ -163,6 +157,38 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         AddLog("Bridge command capture initialized.");
     }
 
+    public void StopBridge()
+    {
+        CancellationTokenSource? cancellationTokenSource;
+
+        lock (_sync)
+        {
+            if (!IsRunning)
+            {
+                AddLog("Bridge is not running.");
+                return;
+            }
+
+            cancellationTokenSource = _cancellationTokenSource;
+        }
+
+        if (cancellationTokenSource is null)
+        {
+            AddLog("Bridge stop requested before the listener was ready.");
+            return;
+        }
+
+        if (cancellationTokenSource.IsCancellationRequested)
+        {
+            AddLog("Bridge stop already requested.");
+            return;
+        }
+
+        SetStatusText("Stopping bridge.");
+        AddLog("Stopping bridge.");
+        cancellationTokenSource.Cancel();
+    }
+
     public bool OnShutdownRequested(ShutdownReason reason) => true;
 
     public async Task OnShutdownAsync(ShutdownReason reason)
@@ -196,9 +222,9 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
     }
 
-    public void CopyPromptToClipboard()
+    public void CopyPipeNameToClipboard()
     {
-        if (!IsRunning || string.IsNullOrWhiteSpace(PromptText))
+        if (!IsRunning || string.IsNullOrWhiteSpace(PipeName))
         {
             return;
         }
@@ -207,12 +233,12 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         {
             try
             {
-                Clipboard.SetText(PromptText);
-                AddLog("Prompt copied to clipboard.");
+                Clipboard.SetText(PipeName);
+                AddLog("Pipe name copied to clipboard.");
             }
             catch (ExternalException)
             {
-                AddLog("Clipboard was busy, so the prompt could not be copied.");
+                AddLog("Clipboard was busy, so the pipe name could not be copied.");
             }
         }
 
@@ -703,6 +729,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             InvokeOnUiThread(() =>
             {
                 IsRunning = false;
+                PipeName = string.Empty;
+                PipePath = string.Empty;
                 StatusText = "Bridge stopped.";
             });
             AddLog("Bridge stopped.");

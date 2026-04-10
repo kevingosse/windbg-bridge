@@ -22,14 +22,27 @@
         </StackPanel>
 
         <StackPanel Grid.Row="1" Margin="0,16,0,0">
-            <TextBlock FontWeight="SemiBold" Text="Named pipe" />
-            <TextBox Margin="0,6,0,0"
-                     IsReadOnly="True"
-                     FontFamily="Consolas"
-                     Text="{Binding PipePath, Mode=OneWay}" />
-            <TextBlock Margin="0,6,0,0"
-                       TextWrapping="Wrap"
-                       Text="{Binding PromptText}" />
+            <TextBlock FontWeight="SemiBold" Text="Named pipe name" />
+            <Grid Margin="0,6,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBox Grid.Column="0"
+                         IsReadOnly="True"
+                         FontFamily="Consolas"
+                         Text="{Binding PipeName, Mode=OneWay}" />
+                <Button Grid.Column="1"
+                        Margin="8,0,0,0"
+                        Padding="10,4"
+                        Command="{Binding CopyPipeNameCommand}"
+                        ToolTip="Copy pipe name">
+                    <TextBlock FontFamily="Segoe MDL2 Assets"
+                               FontSize="14"
+                               Text="&#xE8C8;" />
+                </Button>
+            </Grid>
         </StackPanel>
 
         <StackPanel Grid.Row="2" Margin="0,16,0,0" Orientation="Horizontal">
@@ -40,8 +53,8 @@
             <Button MinWidth="110"
                     Margin="8,0,0,0"
                     Padding="12,4"
-                    Command="{Binding CopyPromptCommand}"
-                    Content="Copy prompt" />
+                    Command="{Binding StopBridgeCommand}"
+                    Content="Stop bridge" />
         </StackPanel>
 
         <StackPanel Grid.Row="3" Margin="0,16,0,0">
