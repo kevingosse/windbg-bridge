@@ -25,6 +25,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 {
     private const int MaxLogEntries = 200;
     private const int MaxHistoryEntries = 100;
+    private const string BridgeNotRunningError = "The bridge is not running.";
+    private const string BridgeNotStartedUserMessage = "WinDbg bridge is not started. Run !startbridge first.";
     private const string NamedPipePathPrefix = @"\\.\pipe\";
 
     private static readonly Regex StartupBridgeArgumentRegex = new(
@@ -44,9 +46,11 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 
     private readonly ObservableCollection<string> _logEntries = new();
     private readonly List<BridgeHistoryRecord> _history = new();
+    private readonly HashSet<Task> _clientConnectionTasks = new();
     private readonly Queue<PendingAgentCommand> _pendingAgentCommands = new();
     private readonly object _sync = new();
     private readonly UTF8Encoding _utf8WithoutBom = new(encoderShouldEmitUTF8Identifier: false);
+    private Channel<string> _pendingPrompts = CreatePromptChannel();
 
     [Import]
     private IDbgConsole _console = null!;
@@ -148,6 +152,49 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         StartBridgeFromRequestedPipe(pipeName, "client command");
     }
 
+    [ClientCommand(
+        Name = "ask",
+        Description = "Queues a prompt for the connected agent.",
+        AvailableStates = EngineStates.All)]
+    public void QueuePromptFromClientCommand(
+        [ClientParameter(Name = "prompt", ConsumesRestOfCommandLine = true)] string? prompt)
+    {
+        ExecuteInteractiveClientCommand(() => QueuePrompt(prompt, "ask"));
+    }
+
+    [ClientCommand(
+        Name = "!ask",
+        Description = "Queues a prompt for the connected agent.",
+        AvailableStates = EngineStates.All)]
+    public void QueuePromptFromBangClientCommand(
+        [ClientParameter(Name = "prompt", ConsumesRestOfCommandLine = true)] string? prompt)
+    {
+        ExecuteInteractiveClientCommand(() => QueuePrompt(prompt, "!ask"));
+    }
+
+    [ClientCommand(
+        Name = "!startbridge",
+        Description = "Starts the WinDbg Bridge with an optional pipe name.",
+        AvailableStates = EngineStates.All)]
+    public void StartBridgeFromBangInteractiveCommand(
+        [ClientParameter(Name = "pipeName", ConsumesRestOfCommandLine = true)] string? pipeName = null)
+    {
+        ExecuteInteractiveClientCommand(() =>
+        {
+            string message = StartBridgeFromRequestedPipeOrThrow(pipeName, "!startbridge");
+            WriteInteractiveCommandMessage(message);
+        });
+    }
+
+    [ClientCommand(
+        Name = "!stopbridge",
+        Description = "Stops the WinDbg Bridge.",
+        AvailableStates = EngineStates.All)]
+    public void StopBridgeFromBangInteractiveCommand()
+    {
+        ExecuteInteractiveClientCommand(StopBridgeOrThrow);
+    }
+
     public void EnsureStarted()
         => EnsureStarted(null, "manual start");
 
@@ -168,6 +215,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             {
                 PipeName = pipeName;
                 PipePath = NamedPipePathPrefix + PipeName;
+                _pendingPrompts = CreatePromptChannel();
                 startedNow = true;
 
                 _cancellationTokenSource = new CancellationTokenSource();
@@ -178,7 +226,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         if (startedNow)
         {
             IsRunning = true;
-            SetStatusText("Listening for an agent connection.");
+            SetStatusText("Listening for agent connections.");
             AddLog($"Bridge started on {PipePath}.");
         }
         else if (string.Equals(PipeName, pipeName, StringComparison.Ordinal))
@@ -218,7 +266,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         {
             if (!IsRunning)
             {
-                AddLog("Bridge is not running.");
+                AddLog(BridgeNotRunningError);
                 return;
             }
 
@@ -356,9 +404,46 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         return new NamedPipeServerStream(
             pipeName,
             PipeDirection.InOut,
-            1,
+            NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous);
+    }
+
+    private static Channel<string> CreatePromptChannel()
+    {
+        return Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+        {
+            SingleReader = false,
+            SingleWriter = false
+        });
+    }
+
+    private void ExecuteInteractiveClientCommand(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (InvalidOperationException ex) when (string.Equals(ex.Message, BridgeNotRunningError, StringComparison.Ordinal))
+        {
+            WriteInteractiveCommandMessage(BridgeNotStartedUserMessage);
+            AddLog(BridgeNotStartedUserMessage);
+        }
+        catch (Exception ex)
+        {
+            WriteInteractiveCommandMessage(ex.ToString());
+            AddLog("Client command failed: " + ex.Message);
+        }
+    }
+
+    private static string DescribeConnectionStatus(int activeConnectionCount)
+    {
+        return activeConnectionCount switch
+        {
+            <= 0 => "Listening for agent connections.",
+            1 => "1 agent connection active.",
+            _ => activeConnectionCount + " agent connections active."
+        };
     }
 
     private long GetNextHistoryId()
@@ -603,6 +688,63 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         completedCommand.OutputWriter?.TryComplete();
     }
 
+    private void QueuePrompt(string? promptText, string source)
+    {
+        string prompt = NormalizePrompt(promptText);
+        if (string.IsNullOrEmpty(prompt))
+        {
+            throw new ArgumentException(source + " requires prompt text.");
+        }
+
+        lock (_sync)
+        {
+            if (!IsRunning)
+            {
+                throw new InvalidOperationException(BridgeNotRunningError);
+            }
+        }
+
+        if (!_pendingPrompts.Writer.TryWrite(prompt))
+        {
+            throw new InvalidOperationException("Failed to queue the prompt for the agent.");
+        }
+
+        AddLog($"Queued agent prompt from {source}: {SummarizeForLog(prompt)}");
+    }
+
+    private string StartBridgeFromRequestedPipeOrThrow(string? requestedPipeName, string source)
+    {
+        if (!TryResolvePipeName(requestedPipeName, out string normalizedPipeName, out string? validationError))
+        {
+            throw new InvalidOperationException(validationError);
+        }
+
+        EnsureStarted(normalizedPipeName, source);
+
+        lock (_sync)
+        {
+            if (!IsRunning || string.IsNullOrWhiteSpace(PipeName))
+            {
+                throw new InvalidOperationException("The bridge did not start successfully.");
+            }
+
+            return "WinDbg bridge active on " + PipeName;
+        }
+    }
+
+    private void StopBridgeOrThrow()
+    {
+        lock (_sync)
+        {
+            if (!IsRunning)
+            {
+                throw new InvalidOperationException(BridgeNotRunningError);
+            }
+        }
+
+        StopBridge();
+    }
+
     private async Task<BridgeResponse> ProcessRequestAsync(
         string requestText,
         CancellationToken cancellationToken,
@@ -672,6 +814,16 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     Truncated = slice.WasTruncated
                 };
 
+            case "listen":
+                string prompt = await _pendingPrompts.Reader.ReadAsync(cancellationToken);
+                AddLog("Delivered agent prompt: " + SummarizeForLog(prompt));
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Output = prompt
+                };
+
             case "execute":
                 if (string.IsNullOrWhiteSpace(request.Text))
                 {
@@ -720,7 +872,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 }
 
             default:
-                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, execute, history, or output.");
+                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, history, or output.");
         }
     }
 
@@ -811,44 +963,80 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
     }
 
+    private async Task HandleConnectedClientAsync(NamedPipeServerStream server, CancellationToken cancellationToken)
+    {
+        using (server)
+        {
+            int activeConnections = UpdateActiveConnections(1);
+            SetStatusText(DescribeConnectionStatus(activeConnections));
+            AddLog("Agent connected.");
+
+            try
+            {
+                await HandleClientAsync(server, cancellationToken);
+
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    AddLog("Agent connection closed.");
+                }
+            }
+            catch (IOException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                AddLog(IsDisconnectedPipe(ex)
+                    ? "Agent connection closed."
+                    : "The agent connection failed: " + ex.Message);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                AddLog("The agent connection failed: " + ex.Message);
+            }
+            finally
+            {
+                activeConnections = UpdateActiveConnections(-1);
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    SetStatusText(DescribeConnectionStatus(activeConnections));
+                }
+            }
+        }
+    }
+
+    private void TrackClientConnection(Task clientTask)
+    {
+        lock (_sync)
+        {
+            _clientConnectionTasks.Add(clientTask);
+        }
+
+        _ = clientTask.ContinueWith(
+            completedTask =>
+            {
+                lock (_sync)
+                {
+                    _clientConnectionTasks.Remove(completedTask);
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     private async Task RunServerLoopAsync(string pipeName, CancellationToken cancellationToken)
     {
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                bool clientConnected = false;
-
+                NamedPipeServerStream server = CreatePipeServer(pipeName);
                 try
                 {
-                    using NamedPipeServerStream server = CreatePipeServer(pipeName);
                     await server.WaitForConnectionAsync(cancellationToken);
-
-                    clientConnected = true;
-                    UpdateActiveConnections(1);
-                    SetStatusText("Agent connected.");
-                    AddLog("Agent connected.");
-
-                    await HandleClientAsync(server, cancellationToken);
+                    TrackClientConnection(HandleConnectedClientAsync(server, cancellationToken));
                 }
-                catch (IOException ex) when (!cancellationToken.IsCancellationRequested)
+                catch
                 {
-                    AddLog(IsDisconnectedPipe(ex)
-                        ? "Agent connection closed."
-                        : "The agent connection failed: " + ex.Message);
-                }
-                finally
-                {
-                    if (clientConnected)
-                    {
-                        UpdateActiveConnections(-1);
-                    }
-                }
-
-                if (!cancellationToken.IsCancellationRequested)
-                {
-                    SetStatusText("Listening for the next agent connection.");
-                    AddLog("Waiting for the next agent connection.");
+                    server.Dispose();
+                    throw;
                 }
             }
         }
@@ -861,12 +1049,35 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
         finally
         {
+            Task[] clientTasks;
+            CancellationTokenSource? cancellationTokenSource;
+
             lock (_sync)
             {
-                _cancellationTokenSource?.Dispose();
+                clientTasks = _clientConnectionTasks.ToArray();
+                cancellationTokenSource = _cancellationTokenSource;
                 _cancellationTokenSource = null;
                 _listenerTask = null;
+            }
+
+            if (clientTasks.Length > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(clientTasks);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                }
+            }
+
+            cancellationTokenSource?.Dispose();
+
+            lock (_sync)
+            {
+                _clientConnectionTasks.Clear();
                 _activeConnectionCount = 0;
+                _pendingPrompts = CreatePromptChannel();
             }
 
             InvokeOnUiThread(() =>
@@ -923,6 +1134,35 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         return string.Equals(left.Trim(), right.Trim(), StringComparison.Ordinal);
     }
 
+    private static string NormalizePrompt(string? promptText)
+    {
+        return string.IsNullOrWhiteSpace(promptText)
+            ? string.Empty
+            : promptText.Trim();
+    }
+
+    private static string SummarizeForLog(string text)
+    {
+        const int MaxLength = 120;
+        return text.Length <= MaxLength
+            ? text
+            : text[..(MaxLength - 3)] + "...";
+    }
+
+    private void WriteInteractiveCommandMessage(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        string formattedMessage = message.EndsWith(Environment.NewLine, StringComparison.Ordinal)
+            ? message
+            : message + Environment.NewLine;
+
+        InvokeOnUiThread(() => _console.PrintTextToConsole(formattedMessage, isCompleteCommand: false));
+    }
+
     private static string? TryExtractPromptPrefix(string promptText)
     {
         if (string.IsNullOrWhiteSpace(promptText))
@@ -952,11 +1192,12 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         return TryExtractPromptPrefix(normalizedOutput);
     }
 
-    private void UpdateActiveConnections(int delta)
+    private int UpdateActiveConnections(int delta)
     {
         lock (_sync)
         {
             _activeConnectionCount = Math.Max(0, _activeConnectionCount + delta);
+            return _activeConnectionCount;
         }
     }
 }

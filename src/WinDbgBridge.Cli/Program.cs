@@ -447,6 +447,13 @@ internal static class Program
                     Console.Write(response.Output);
                 }
                 break;
+
+            case "listen":
+                if (!string.IsNullOrEmpty(response.Output))
+                {
+                    Console.WriteLine(response.Output);
+                }
+                break;
         }
 
         return 0;
@@ -546,6 +553,7 @@ internal static class Program
                             "If --timeout is omitted for launch, the client waits up to 30 seconds for the bridge to come up.\n" +
                             "Examples:\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 status\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 listen\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 execute !clrstack\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 history --count 10\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
@@ -570,7 +578,7 @@ internal static class Program
 
             if (positional.Count == 0)
             {
-                throw new InvalidOperationException("A bridge command is required. Use status, execute, history, or output.");
+                throw new InvalidOperationException("A bridge command is required. Use status, listen, execute, history, or output.");
             }
 
             string operation = positional[0].Trim().ToLowerInvariant();
@@ -578,9 +586,10 @@ internal static class Program
             switch (operation)
             {
                 case "status":
+                case "listen":
                     if (positional.Count != 1)
                     {
-                        throw new InvalidOperationException("status does not accept additional arguments.");
+                        throw new InvalidOperationException(operation + " does not accept additional arguments.");
                     }
                     break;
 
@@ -613,7 +622,7 @@ internal static class Program
                     break;
 
                 default:
-                    throw new InvalidOperationException("Unknown bridge command. Use status, execute, history, or output.");
+                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, history, or output.");
             }
 
             return new BridgeClientOptions
