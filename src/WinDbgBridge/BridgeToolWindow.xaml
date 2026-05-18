@@ -13,7 +13,6 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -46,16 +45,7 @@
             </Grid>
         </StackPanel>
 
-        <StackPanel Grid.Row="2" Margin="0,16,0,0">
-            <TextBlock FontWeight="SemiBold" Text="Startup command argument" />
-            <TextBox Margin="0,6,0,0"
-                     IsReadOnly="True"
-                     FontFamily="Consolas"
-                     TextWrapping="Wrap"
-                     Text="{Binding StartupCommandArgument, Mode=OneWay}" />
-        </StackPanel>
-
-        <StackPanel Grid.Row="3" Margin="0,16,0,0" Orientation="Horizontal">
+        <StackPanel Grid.Row="2" Margin="0,16,0,0" Orientation="Horizontal">
             <Button MinWidth="110"
                     Padding="12,4"
                     Command="{Binding StartBridgeCommand}"
@@ -67,7 +57,7 @@
                     Content="Stop bridge" />
         </StackPanel>
 
-        <StackPanel Grid.Row="4" Margin="0,16,0,0">
+        <StackPanel Grid.Row="3" Margin="0,16,0,0">
             <TextBlock FontWeight="SemiBold" Text="Recent activity" />
             <ListBox Margin="0,6,0,0"
                      x:Name="ActivityLogListBox"

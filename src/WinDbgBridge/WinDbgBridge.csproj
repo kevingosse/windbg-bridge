@@ -11,6 +11,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Resource Include="windbg-bridge.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="DbgX.Interfaces">
       <HintPath>..\..\lib\DbgX.Interfaces.dll</HintPath>
       <Private>false</Private>

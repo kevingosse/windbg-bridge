@@ -3,4 +3,6 @@
                xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                xmlns:fluent="urn:fluent-ribbon"
                Header="Bridge"
+               LargeIcon="/WinDbgBridge;component/windbg-bridge.png"
+               Icon="/WinDbgBridge;component/windbg-bridge.png"
                Command="{Binding ShowCommand}" />
