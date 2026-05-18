@@ -93,12 +93,24 @@ Use `output` when you need the text for a specific history entry. Prefer `--max-
 windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000
 ```
 
+To keep the **last** N characters instead of the first (useful for commands like `!dumpheap -stat` where the summary is at the end):
+
+```powershell
+windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000 --tail
+```
+
 ### Execute
 
 `execute` sends one WinDbg command. Agent-triggered commands are submitted as typed commands so they should appear in WinDbg like normal user input.
 
 ```powershell
 windbg-bridge.exe --pipe windbg-bridge-123 execute "!clrstack"
+```
+
+Use `--max-chars` to cap the streamed output. Add `--tail` to keep the last N characters instead of the first (useful for verbose commands like `!dumpheap -stat` where the summary is at the end):
+
+```powershell
+windbg-bridge.exe --pipe windbg-bridge-123 execute --max-chars 4000 --tail "!dumpheap -stat"
 ```
 
 ### Listen

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -45,14 +46,8 @@ internal static class Program
 
             using NamedPipeClientStream client = new(".", NormalizePipeName(options.Pipe), PipeDirection.InOut);
 
-            if (options.TimeoutSeconds is int timeoutSeconds)
-            {
-                client.Connect(timeoutSeconds * 1000);
-            }
-            else
-            {
-                client.Connect();
-            }
+            int connectTimeoutMs = options.TimeoutSeconds is int t ? t * 1000 : 5000;
+            client.Connect(connectTimeoutMs);
 
             if (options.Verbose)
             {
@@ -76,6 +71,7 @@ internal static class Program
                 Count = options.Count,
                 Id = options.Id,
                 MaxChars = options.MaxChars,
+                Tail = options.Tail ? true : null,
                 Stream = options.StreamExecuteOutput
             };
 
@@ -88,7 +84,7 @@ internal static class Program
             writer.WriteLine(serializedRequest);
 
             return options.Operation == "execute" && options.StreamExecuteOutput
-                ? WriteExecuteResponses(reader, options.TimeoutSeconds, options.Verbose)
+                ? WriteExecuteResponses(reader, options.TimeoutSeconds, options.Verbose, options.MaxChars, options.Tail)
                 : WriteSingleResponse(reader, options.Operation, options.TimeoutSeconds, options.Verbose);
         }
         catch (OperationCanceledException)
@@ -387,9 +383,12 @@ internal static class Program
         return response;
     }
 
-    private static int WriteExecuteResponses(StreamReader reader, int? timeoutSeconds, bool verbose)
+    private static int WriteExecuteResponses(StreamReader reader, int? timeoutSeconds, bool verbose, int? maxChars, bool tail)
     {
         bool streamedOutput = false;
+        bool truncate = maxChars is not null;
+        StringBuilder? buffer = truncate ? new StringBuilder() : null;
+        int charsWritten = 0;
 
         while (true)
         {
@@ -398,11 +397,41 @@ internal static class Program
             {
                 if (!string.IsNullOrEmpty(response.Output))
                 {
-                    Console.Write(response.Output);
                     streamedOutput = true;
+
+                    if (tail)
+                    {
+                        buffer!.Append(response.Output);
+                    }
+                    else if (truncate)
+                    {
+                        int remaining = maxChars!.Value - charsWritten;
+                        if (remaining > 0)
+                        {
+                            string chunk = response.Output.Length <= remaining
+                                ? response.Output
+                                : response.Output[..remaining];
+                            Console.Write(chunk);
+                            charsWritten += chunk.Length;
+                        }
+                    }
+                    else
+                    {
+                        Console.Write(response.Output);
+                    }
                 }
 
                 continue;
+            }
+
+            if (tail && buffer!.Length > 0)
+            {
+                string text = buffer.ToString();
+                if (text.Length > maxChars!.Value)
+                {
+                    text = text[^maxChars.Value..];
+                }
+                Console.Write(text);
             }
 
             return WriteResponse("execute", response, suppressExecuteOutput: streamedOutput);
@@ -473,6 +502,8 @@ internal static class Program
 
         public int? MaxChars { get; init; }
 
+        public bool Tail { get; init; }
+
         public int? TimeoutSeconds { get; init; }
 
         public bool Verbose { get; init; }
@@ -486,6 +517,7 @@ internal static class Program
             int? count = null;
             long? id = null;
             int? maxChars = null;
+            bool tail = false;
             int? timeoutSeconds = null;
             List<string> positional = new();
 
@@ -543,13 +575,17 @@ internal static class Program
                         maxChars = parsedMaxChars;
                         break;
 
+                    case "--tail":
+                        tail = true;
+                        break;
+
                     case "--help":
                     case "-h":
                         throw new InvalidOperationException(
                             "Usage:\n" +
                             "  windbg-bridge.exe --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
                             "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
-                            "If --timeout is omitted for bridge commands, the client waits indefinitely.\n" +
+                            "If --timeout is omitted for bridge commands, the client connects with a 5-second timeout and waits indefinitely for responses.\n" +
                             "If --timeout is omitted for launch, the client waits up to 30 seconds for the bridge to come up.\n" +
                             "Examples:\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 status\n" +
@@ -557,9 +593,11 @@ internal static class Program
                             "  windbg-bridge.exe --pipe windbg-bridge-123 execute !clrstack\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 history --count 10\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000 --tail\n" +
                             "  windbg-bridge.exe launch\n" +
                             "  windbg-bridge.exe launch --pipe windbg-bridge-demo -- -z C:\\dumps\\app.dmp\n" +
-                            "  windbg-bridge.exe launch -- --server tcp:port=5005");
+                            "  windbg-bridge.exe launch -- --server tcp:port=5005\n" +
+                            "--tail: when used with --max-chars, keeps the last N characters instead of the first N.");
 
                     case "--verbose":
                     case "-v":
@@ -612,7 +650,7 @@ internal static class Program
                 case "output":
                     if (positional.Count > 1)
                     {
-                        throw new InvalidOperationException("output does not accept positional arguments. Use --id <n> and optional --max-chars <n>.");
+                        throw new InvalidOperationException("output does not accept positional arguments. Use --id <n> and optional --max-chars <n> [--tail].");
                     }
 
                     if (id is null)
@@ -633,6 +671,7 @@ internal static class Program
                 Count = count,
                 Id = id,
                 MaxChars = maxChars,
+                Tail = tail,
                 TimeoutSeconds = timeoutSeconds,
                 Verbose = args.Any(arg => arg is "--verbose" or "-v"),
                 StreamExecuteOutput = operation == "execute"
@@ -753,6 +792,8 @@ internal sealed class BridgeRequest
     public long? Id { get; set; }
 
     public int? MaxChars { get; set; }
+
+    public bool? Tail { get; set; }
 
     public bool? Stream { get; set; }
 }

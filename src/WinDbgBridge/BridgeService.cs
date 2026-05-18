@@ -803,7 +803,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     return BuildErrorResponse(command, $"No history entry with id {request.Id.Value} was found.");
                 }
 
-                OutputSlice slice = SliceOutput(record.Output, request.MaxChars);
+                OutputSlice slice = SliceOutput(record.Output, request.MaxChars, request.Tail == true);
                 return new BridgeResponse
                 {
                     Success = true,
@@ -1102,7 +1102,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         return win32Error is 109 or 232 or 233;
     }
 
-    private static OutputSlice SliceOutput(string text, int? maxChars)
+    private static OutputSlice SliceOutput(string text, int? maxChars, bool tail)
     {
         if (maxChars is null)
         {
@@ -1120,7 +1120,9 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             return new OutputSlice(text, false);
         }
 
-        return new OutputSlice(text[..requestedLength], true);
+        return tail
+            ? new OutputSlice(text[^requestedLength..], true)
+            : new OutputSlice(text[..requestedLength], true);
     }
 
     private static string StripDml(string text)
@@ -1213,6 +1215,8 @@ internal sealed class BridgeRequest
     public long? Id { get; set; }
 
     public int? MaxChars { get; set; }
+
+    public bool? Tail { get; set; }
 
     public bool? Stream { get; set; }
 }
