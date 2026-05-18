@@ -17,7 +17,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.x'
-          dotnet-quality: 'preview'
 
       - name: Publish extension
         run: dotnet publish src/WinDbgBridge/WinDbgBridge.csproj -c Release -o artifacts/extension --nologo
