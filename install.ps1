@@ -3,8 +3,6 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
 
-    [string]$WindbgXDir = "",
-
     [string]$ExtensionDir = "",
 
     [switch]$IncludeSymbols
@@ -43,10 +41,6 @@ $clientPublishArgs = @(
     "--nologo",
     "--verbosity", "minimal"
 )
-
-if (-not [string]::IsNullOrWhiteSpace($WindbgXDir)) {
-    $publishArgs += "-p:WindbgXDir=$WindbgXDir"
-}
 
 Write-Host "Publishing WinDbgBridge..."
 & dotnet @publishArgs

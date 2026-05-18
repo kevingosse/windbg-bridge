@@ -8,28 +8,27 @@
     <AssemblyName>WinDbgBridge</AssemblyName>
     <Platforms>AnyCPU</Platforms>
     <LangVersion>latest</LangVersion>
-    <WindbgXDir Condition="'$(WindbgXDir)' == ''">E:\WindbgX</WindbgXDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="DbgX.Interfaces">
-      <HintPath>$(WindbgXDir)\DbgX.Interfaces.dll</HintPath>
+      <HintPath>..\..\lib\DbgX.Interfaces.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="DbgX.Interfaces.Internal">
-      <HintPath>$(WindbgXDir)\DbgX.Interfaces.Internal.dll</HintPath>
+      <HintPath>..\..\lib\DbgX.Interfaces.Internal.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="DbgX.Util">
-      <HintPath>$(WindbgXDir)\DbgX.Util.dll</HintPath>
+      <HintPath>..\..\lib\DbgX.Util.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Fluent">
-      <HintPath>$(WindbgXDir)\Fluent.dll</HintPath>
+      <HintPath>..\..\lib\Fluent.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="System.ComponentModel.Composition">
-      <HintPath>$(WindbgXDir)\System.ComponentModel.Composition.dll</HintPath>
+      <HintPath>..\..\lib\System.ComponentModel.Composition.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
