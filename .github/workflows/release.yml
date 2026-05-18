@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+          dotnet-quality: 'preview'
+
+      - name: Publish extension
+        run: dotnet publish src/WinDbgBridge/WinDbgBridge.csproj -c Release -o artifacts/extension --nologo
+
+      - name: Publish CLI
+        run: dotnet publish src/WinDbgBridge.Cli/WinDbgBridge.Cli.csproj -c Release -o artifacts/cli --nologo
+
+      - name: Stage release
+        shell: pwsh
+        run: |
+          $out = "artifacts/release"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          New-Item -ItemType Directory -Force "$out/windbg-bridge" | Out-Null
+          Copy-Item "artifacts/extension/WinDbgBridge.dll" "$out/"
+          Copy-Item "artifacts/cli/*" "$out/windbg-bridge/"
+          Copy-Item "SKILL.md" "$out/"
+          Copy-Item "install.ps1" "$out/"
+
+      - name: Create zip
+        shell: pwsh
+        run: Compress-Archive -Path "artifacts/release/*" -DestinationPath "artifacts/windbg-bridge-${{ github.ref_name }}.zip"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/windbg-bridge-${{ github.ref_name }}.zip
+          generate_release_notes: true

@@ -19,10 +19,10 @@ With the bridge active, you can:
 
 1. Make sure the WinDbg extension is installed.
 2. If WinDbg is not already running with the bridge enabled, launch it with the bridge CLI:
-   - `E:\git\windbg-bridge\artifacts\publish\windbg-bridge\Release\windbg-bridge.exe launch [-- <optional WinDbg args>]`
+   - `%LOCALAPPDATA%\DBG\UIExtensions\windbg-bridge\windbg-bridge.exe launch [-- <optional WinDbg args>]`
 3. Obtain the pipe name from the WinDbg bridge panel, or reuse the `pipeName` returned by `launch`.
 4. Use the CLI to talk to the pipe:
-   - `E:\git\windbg-bridge\artifacts\publish\windbg-bridge\Release\windbg-bridge.exe`
+   - `%LOCALAPPDATA%\DBG\UIExtensions\windbg-bridge\windbg-bridge.exe`
 5. Start with `status` to confirm the bridge is running and the pipe is correct.
 6. Launch an instance _in the background_ with the `listen` option. It will block until the WinDbg user queues a prompt with `ask ...` or `!ask ...`. It allows the user to communicate with you directly from Windbg.
 7. Use `history` for lightweight command discovery.
