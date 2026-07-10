@@ -72,7 +72,9 @@ internal static class Program
                 Id = options.Id,
                 MaxChars = options.MaxChars,
                 Tail = options.Tail ? true : null,
-                Stream = options.StreamExecuteOutput
+                Stream = options.StreamExecuteOutput,
+                Since = options.Since,
+                Seconds = options.Seconds
             };
 
             string serializedRequest = JsonSerializer.Serialize(request, JsonOptions);
@@ -89,7 +91,10 @@ internal static class Program
         }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine("Timed out while connecting to the bridge or waiting for a response.");
+            Console.Error.WriteLine(
+                "Timed out while connecting to the bridge or waiting for a response. " +
+                "Run 'status' to check the bridge: if session.runningState is 'Running', the debuggee is executing and " +
+                "commands cannot be delivered — use 'break' to interrupt it or 'wait' until it breaks in.");
             return 1;
         }
         catch (Exception ex)
@@ -462,7 +467,24 @@ internal static class Program
                 break;
 
             case "status":
+            case "break":
+            case "wait":
                 Console.WriteLine(JsonSerializer.Serialize(response.Status, PrettyJsonOptions));
+                break;
+
+            case "console":
+                if (!string.IsNullOrEmpty(response.Output))
+                {
+                    Console.Write(response.Output);
+                    if (!response.Output.EndsWith('\n'))
+                    {
+                        Console.WriteLine();
+                    }
+                }
+
+                Console.Error.WriteLine(
+                    $"console-length: {response.TotalLength}; next --since {response.NextOffset}" +
+                    (response.Truncated == true ? " (output was truncated)" : string.Empty));
                 break;
 
             case "history":
@@ -510,6 +532,10 @@ internal static class Program
 
         public bool StreamExecuteOutput { get; init; }
 
+        public long? Since { get; init; }
+
+        public int? Seconds { get; init; }
+
         public static BridgeClientOptions Parse(string[] args)
         {
             string? pipe = null;
@@ -519,6 +545,8 @@ internal static class Program
             int? maxChars = null;
             bool tail = false;
             int? timeoutSeconds = null;
+            long? since = null;
+            int? seconds = null;
             List<string> positional = new();
 
             for (int i = 0; i < args.Length; i++)
@@ -579,18 +607,50 @@ internal static class Program
                         tail = true;
                         break;
 
+                    case "--since":
+                        if (i + 1 >= args.Length || !long.TryParse(args[++i], out long parsedSince) || parsedSince < 0)
+                        {
+                            throw new InvalidOperationException("Since must be zero or a positive integer.");
+                        }
+
+                        since = parsedSince;
+                        break;
+
+                    case "--seconds":
+                    case "-s":
+                        if (i + 1 >= args.Length || !int.TryParse(args[++i], out int parsedSeconds) || parsedSeconds <= 0)
+                        {
+                            throw new InvalidOperationException("Seconds must be a positive integer.");
+                        }
+
+                        seconds = parsedSeconds;
+                        break;
+
                     case "--help":
                     case "-h":
                         throw new InvalidOperationException(
                             "Usage:\n" +
                             "  windbg-bridge.exe --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
                             "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
+                            "Commands: status, listen, execute, break, wait, console, history, output\n" +
+                            "  status   Bridge and debugger state (session.runningState tells you if the target is running).\n" +
+                            "  execute  Send one WinDbg command. Rejected while the target is running; use break or wait first.\n" +
+                            "  break    Force a running target to break in (--seconds <n> bounds the wait, default 10).\n" +
+                            "  wait     Block until the target breaks in (--seconds <n> bounds the wait, default 300). Check\n" +
+                            "           session.runningState in the response to distinguish break-in from timeout.\n" +
+                            "  console  Read the full console transcript, including output produced while the target runs\n" +
+                            "           (breakpoint commands, module loads). --since <offset> reads incrementally; the response\n" +
+                            "           footer on stderr reports next-since. Defaults to the last 10000 chars.\n" +
                             "If --timeout is omitted for bridge commands, the client connects with a 5-second timeout and waits indefinitely for responses.\n" +
                             "If --timeout is omitted for launch, the client waits up to 30 seconds for the bridge to come up.\n" +
                             "Examples:\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 status\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 listen\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 execute !clrstack\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 execute g\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 wait --seconds 60\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 break\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 console --since 12345\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 history --count 10\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000 --tail\n" +
@@ -631,6 +691,32 @@ internal static class Program
                     }
                     break;
 
+                case "break":
+                case "wait":
+                    if (positional.Count != 1)
+                    {
+                        throw new InvalidOperationException(operation + " does not accept positional arguments. Use --seconds <n> to bound the wait.");
+                    }
+                    break;
+
+                case "console":
+                    if (positional.Count != 1)
+                    {
+                        throw new InvalidOperationException("console does not accept positional arguments. Use --since <offset>, --max-chars <n>, and --tail.");
+                    }
+
+                    if (maxChars is null)
+                    {
+                        // Keep the default read bounded; without --since the most recent output
+                        // is the interesting part, so default to the tail.
+                        maxChars = 10000;
+                        if (since is null)
+                        {
+                            tail = true;
+                        }
+                    }
+                    break;
+
                 case "history":
                     if (positional.Count > 1)
                     {
@@ -660,7 +746,7 @@ internal static class Program
                     break;
 
                 default:
-                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, history, or output.");
+                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, break, wait, console, history, or output.");
             }
 
             return new BridgeClientOptions
@@ -674,7 +760,9 @@ internal static class Program
                 Tail = tail,
                 TimeoutSeconds = timeoutSeconds,
                 Verbose = args.Any(arg => arg is "--verbose" or "-v"),
-                StreamExecuteOutput = operation == "execute"
+                StreamExecuteOutput = operation == "execute",
+                Since = since,
+                Seconds = seconds
             };
         }
     }
@@ -796,6 +884,10 @@ internal sealed class BridgeRequest
     public bool? Tail { get; set; }
 
     public bool? Stream { get; set; }
+
+    public long? Since { get; set; }
+
+    public int? Seconds { get; set; }
 }
 
 internal sealed class BridgeResponse
@@ -816,7 +908,9 @@ internal sealed class BridgeResponse
 
     public bool? Truncated { get; set; }
 
-    public int? TotalLength { get; set; }
+    public long? TotalLength { get; set; }
+
+    public long? NextOffset { get; set; }
 
     public string? Event { get; set; }
 }
@@ -834,6 +928,21 @@ internal sealed class BridgeStatus
     public int HistoryCount { get; set; }
 
     public DateTimeOffset? LastRequestAt { get; set; }
+
+    public BridgeSessionState? Session { get; set; }
+
+    public long? ConsoleLength { get; set; }
+}
+
+internal sealed class BridgeSessionState
+{
+    public string? TargetType { get; set; }
+
+    public string? RunningState { get; set; }
+
+    public string? ConnectionState { get; set; }
+
+    public string? Prompt { get; set; }
 }
 
 internal sealed class BridgeHistorySummary
