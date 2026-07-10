@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,6 +14,7 @@ internal static class Program
     private const string NamedPipePathPrefix = @"\\.\pipe\";
     private const string WinDbgPackageName = "Microsoft.WinDbg";
     private const string WinDbgAliasName = "WinDbgX.exe";
+    private const string BridgePipeEnvironmentVariable = "WINDBG_BRIDGE_PIPE";
     private const int DefaultLaunchTimeoutSeconds = 30;
 
     private static readonly Regex PipeNameRegex = new("^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$", RegexOptions.Compiled);
@@ -110,26 +112,39 @@ internal static class Program
         ValidatePipeName(pipeName);
 
         string winDbgPath = ResolveWinDbgExecutablePath(options.WinDbgPath);
-        IReadOnlyList<string> winDbgArguments = BuildWinDbgArguments(options.WinDbgArguments, pipeName);
+        IReadOnlyList<string> winDbgArguments = options.WinDbgArguments;
 
         if (options.Verbose)
         {
             Console.Error.WriteLine("Launching WinDbg from " + winDbgPath);
+            Console.Error.WriteLine($"Bridge pipe passed as {BridgePipeEnvironmentVariable}={pipeName}");
             if (winDbgArguments.Count > 0)
             {
                 Console.Error.WriteLine("WinDbg arguments: " + string.Join(" ", winDbgArguments.Select(QuoteArgumentForDisplay)));
             }
         }
 
-        using Process process = StartWinDbg(winDbgPath, winDbgArguments);
-        WaitForBridgeReady(pipeName, options.TimeoutSeconds ?? DefaultLaunchTimeoutSeconds, options.Verbose, process);
+        using Process process = StartWinDbg(winDbgPath, winDbgArguments, pipeName);
+
+        using (WindowHider? windowHider = options.Headless ? WindowHider.Start(process.Id) : null)
+        {
+            WaitForBridgeReady(pipeName, options.TimeoutSeconds ?? DefaultLaunchTimeoutSeconds, options.Verbose, process);
+
+            if (options.Headless)
+            {
+                // The window hider only hides the HWNDs; tell the extension so WPF's
+                // visibility state matches and a later `show` can undo it.
+                TryHideWinDbgWindow(pipeName, options.Verbose);
+            }
+        }
 
         LaunchResult result = new()
         {
             ProcessId = process.Id,
             PipeName = pipeName,
             PipePath = NamedPipePathPrefix + pipeName,
-            WinDbgPath = winDbgPath
+            WinDbgPath = winDbgPath,
+            Headless = options.Headless ? true : null
         };
 
         Console.WriteLine(JsonSerializer.Serialize(result, PrettyJsonOptions));
@@ -139,59 +154,6 @@ internal static class Program
     private static string CreatePipeName()
     {
         return $"windbg-bridge-{Environment.ProcessId}-{Guid.NewGuid():N}";
-    }
-
-    private static IReadOnlyList<string> BuildWinDbgArguments(IReadOnlyList<string> userArguments, string pipeName)
-    {
-        List<string> arguments = new(userArguments);
-        string bridgeCommand = "bridgestart " + pipeName;
-
-        int commandIndex = FindWinDbgOptionIndex(arguments, "-c", "/c");
-        if (commandIndex >= 0)
-        {
-            if (commandIndex + 1 >= arguments.Count)
-            {
-                throw new InvalidOperationException("WinDbg -c requires a command string.");
-            }
-
-            string existingCommand = arguments[commandIndex + 1];
-            arguments[commandIndex + 1] = string.IsNullOrWhiteSpace(existingCommand)
-                ? bridgeCommand
-                : bridgeCommand + "; " + existingCommand;
-            return arguments;
-        }
-
-        int insertIndex = GetWinDbgCommandInsertIndex(arguments);
-        arguments.Insert(insertIndex, "-c");
-        arguments.Insert(insertIndex + 1, bridgeCommand);
-        return arguments;
-    }
-
-    private static int FindWinDbgOptionIndex(IReadOnlyList<string> arguments, params string[] optionNames)
-    {
-        for (int i = 0; i < arguments.Count; i++)
-        {
-            if (optionNames.Any(optionName => string.Equals(arguments[i], optionName, StringComparison.OrdinalIgnoreCase)))
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private static int GetWinDbgCommandInsertIndex(IReadOnlyList<string> arguments)
-    {
-        if (arguments.Count >= 2 &&
-            (string.Equals(arguments[0], "-server", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "/server", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "-remote", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "/remote", StringComparison.OrdinalIgnoreCase)))
-        {
-            return 2;
-        }
-
-        return 0;
     }
 
     private static string ResolveWinDbgExecutablePath(string? explicitPath)
@@ -248,13 +210,24 @@ internal static class Program
         return string.IsNullOrWhiteSpace(output) ? null : output;
     }
 
-    private static Process StartWinDbg(string winDbgPath, IReadOnlyList<string> arguments)
+    private static Process StartWinDbg(string winDbgPath, IReadOnlyList<string> arguments, string pipeName)
     {
+        // The extension reads the pipe name from the environment, which a shell-executed
+        // child inherits from us. Passing `bridgestart` through WinDbg's `-c` instead makes
+        // WinDbg pop an "Unable to create a debug session" dialog whenever a target is
+        // specified on the same command line.
+        Environment.SetEnvironmentVariable(BridgePipeEnvironmentVariable, pipeName);
+
         ProcessStartInfo startInfo = new()
         {
             FileName = winDbgPath,
-            UseShellExecute = false,
-            WorkingDirectory = Environment.CurrentDirectory
+            WorkingDirectory = Environment.CurrentDirectory,
+
+            // WinDbg and its debuggee outlive this process. Launching them without shell
+            // execute would leak our standard handles into both, so a caller capturing the
+            // launch JSON (`$json = windbg-bridge launch`) would block until the debuggee
+            // exits, waiting for a stdout pipe that nobody closes.
+            UseShellExecute = true
         };
 
         foreach (string argument in arguments)
@@ -327,6 +300,42 @@ internal static class Program
         if (!response.Success || response.Status?.IsRunning != true)
         {
             throw new InvalidOperationException(response.Error ?? "The launched bridge is not ready yet.");
+        }
+    }
+
+    private static void TryHideWinDbgWindow(string pipeName, bool verbose)
+    {
+        try
+        {
+            using NamedPipeClientStream client = new(".", pipeName, PipeDirection.InOut);
+            client.Connect(2000);
+
+            using StreamReader reader = new(client);
+            using StreamWriter writer = new(client) { AutoFlush = true };
+
+            _ = ReadLineWithTimeout(reader, 2);
+
+            string serializedRequest = JsonSerializer.Serialize(new BridgeRequest { Command = "hide" }, JsonOptions);
+            if (verbose)
+            {
+                Console.Error.WriteLine("Hiding the WinDbg window: " + serializedRequest);
+            }
+
+            writer.WriteLine(serializedRequest);
+
+            BridgeResponse response = ReadResponse(reader, 5, verbose);
+            if (!response.Success)
+            {
+                throw new InvalidOperationException(response.Error ?? "The bridge rejected the hide request.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // The launch itself succeeded, and the window hider already hid the HWNDs;
+            // report the inconsistency instead of failing the launch.
+            Console.Error.WriteLine(
+                "Warning: the WinDbg window could not be hidden through the bridge: " + ex.Message +
+                $" Run `windbg-bridge.exe --pipe {pipeName} hide` to retry.");
         }
     }
 
@@ -469,6 +478,8 @@ internal static class Program
             case "status":
             case "break":
             case "wait":
+            case "hide":
+            case "show":
                 Console.WriteLine(JsonSerializer.Serialize(response.Status, PrettyJsonOptions));
                 break;
 
@@ -631,8 +642,8 @@ internal static class Program
                         throw new InvalidOperationException(
                             "Usage:\n" +
                             "  windbg-bridge.exe --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
-                            "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
-                            "Commands: status, listen, execute, break, wait, console, history, output\n" +
+                            "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--headless] [--verbose] [-- <WinDbg args>]\n" +
+                            "Commands: status, listen, execute, break, wait, console, history, output, hide, show\n" +
                             "  status   Bridge and debugger state (session.runningState tells you if the target is running).\n" +
                             "  execute  Send one WinDbg command. Rejected while the target is running; use break or wait first.\n" +
                             "  break    Force a running target to break in (--seconds <n> bounds the wait, default 10).\n" +
@@ -641,6 +652,8 @@ internal static class Program
                             "  console  Read the full console transcript, including output produced while the target runs\n" +
                             "           (breakpoint commands, module loads). --since <offset> reads incrementally; the response\n" +
                             "           footer on stderr reports next-since. Defaults to the last 10000 chars.\n" +
+                            "  hide     Hide the WinDbg window (headless mode); the session keeps working normally.\n" +
+                            "  show     Show the WinDbg window again after hide or a headless launch.\n" +
                             "If --timeout is omitted for bridge commands, the client connects with a 5-second timeout and waits indefinitely for responses.\n" +
                             "If --timeout is omitted for launch, the client waits up to 30 seconds for the bridge to come up.\n" +
                             "Examples:\n" +
@@ -654,7 +667,9 @@ internal static class Program
                             "  windbg-bridge.exe --pipe windbg-bridge-123 history --count 10\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 output --id 42 --max-chars 4000 --tail\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 show\n" +
                             "  windbg-bridge.exe launch\n" +
+                            "  windbg-bridge.exe launch --headless\n" +
                             "  windbg-bridge.exe launch --pipe windbg-bridge-demo -- -z C:\\dumps\\app.dmp\n" +
                             "  windbg-bridge.exe launch -- --server tcp:port=5005\n" +
                             "--tail: when used with --max-chars, keeps the last N characters instead of the first N.");
@@ -676,7 +691,7 @@ internal static class Program
 
             if (positional.Count == 0)
             {
-                throw new InvalidOperationException("A bridge command is required. Use status, listen, execute, history, or output.");
+                throw new InvalidOperationException("A bridge command is required. Use status, listen, execute, break, wait, console, history, output, hide, or show.");
             }
 
             string operation = positional[0].Trim().ToLowerInvariant();
@@ -685,6 +700,8 @@ internal static class Program
             {
                 case "status":
                 case "listen":
+                case "hide":
+                case "show":
                     if (positional.Count != 1)
                     {
                         throw new InvalidOperationException(operation + " does not accept additional arguments.");
@@ -746,7 +763,7 @@ internal static class Program
                     break;
 
                 default:
-                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, break, wait, console, history, or output.");
+                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, break, wait, console, history, output, hide, or show.");
             }
 
             return new BridgeClientOptions
@@ -775,6 +792,8 @@ internal static class Program
 
         public bool Verbose { get; init; }
 
+        public bool Headless { get; init; }
+
         public string? WinDbgPath { get; init; }
 
         public IReadOnlyList<string> WinDbgArguments { get; init; } = Array.Empty<string>();
@@ -790,6 +809,7 @@ internal static class Program
             string? winDbgPath = null;
             int? timeoutSeconds = null;
             bool verbose = false;
+            bool headless = false;
             int passthroughIndex = -1;
 
             for (int i = 1; i < args.Length; i++)
@@ -836,15 +856,20 @@ internal static class Program
                         verbose = true;
                         break;
 
+                    case "--headless":
+                        headless = true;
+                        break;
+
                     case "--help":
                     case "-h":
                         throw new InvalidOperationException(
-                            "Usage: windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
-                            "Launches WinDbg, injects `bridgestart <pipe-name>`, waits for the bridge to become ready, and prints launch metadata as JSON.\n" +
+                            "Usage: windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--headless] [--verbose] [-- <WinDbg args>]\n" +
+                            "Launches WinDbg with WINDBG_BRIDGE_PIPE=<pipe-name> in its environment, waits for the bridge to become ready, and prints launch metadata as JSON.\n" +
+                            "--headless hides the WinDbg window so the session does not disturb anyone at the desktop; use the `show` command to reveal it later.\n" +
                             "Examples:\n" +
                             "  windbg-bridge.exe launch\n" +
                             "  windbg-bridge.exe launch --pipe windbg-bridge-demo\n" +
-                            "  windbg-bridge.exe launch -- -z C:\\dumps\\app.dmp\n" +
+                            "  windbg-bridge.exe launch --headless -- -z C:\\dumps\\app.dmp\n" +
                             "  windbg-bridge.exe launch --timeout 60 -- --server tcp:port=5005");
 
                     default:
@@ -862,10 +887,87 @@ internal static class Program
                 PipeName = pipeName,
                 TimeoutSeconds = timeoutSeconds,
                 Verbose = verbose,
+                Headless = headless,
                 WinDbgPath = winDbgPath,
                 WinDbgArguments = winDbgArguments
             };
         }
+    }
+
+    /// <summary>
+    /// Hides the top-level windows of a process as soon as they appear. WinDbg takes
+    /// several seconds to create its window and start the bridge, so a headless launch
+    /// polls with this instead of letting the window sit on screen until the bridge is
+    /// ready to process a hide request.
+    /// </summary>
+    private sealed class WindowHider : IDisposable
+    {
+        private readonly ManualResetEventSlim _stopRequested = new();
+        private readonly Thread _thread;
+        private readonly int _processId;
+
+        private WindowHider(int processId)
+        {
+            _processId = processId;
+            _thread = new Thread(HideWindowsLoop) { IsBackground = true, Name = "windbg-window-hider" };
+        }
+
+        public static WindowHider Start(int processId)
+        {
+            WindowHider hider = new(processId);
+            hider._thread.Start();
+            return hider;
+        }
+
+        public void Dispose()
+        {
+            _stopRequested.Set();
+            _thread.Join();
+            _stopRequested.Dispose();
+        }
+
+        private void HideWindowsLoop()
+        {
+            while (!_stopRequested.Wait(50))
+            {
+                HideVisibleWindows(_processId);
+            }
+        }
+
+        private static void HideVisibleWindows(int processId)
+        {
+            NativeMethods.EnumWindows(
+                (hwnd, lparam) =>
+                {
+                    _ = NativeMethods.GetWindowThreadProcessId(hwnd, out uint windowProcessId);
+                    if (windowProcessId == (uint)processId && NativeMethods.IsWindowVisible(hwnd))
+                    {
+                        _ = NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
+                    }
+
+                    return true;
+                },
+                IntPtr.Zero);
+        }
+    }
+
+    private static class NativeMethods
+    {
+        public const int SW_HIDE = 0;
+
+        public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hwnd, int cmdShow);
     }
 }
 
@@ -932,6 +1034,8 @@ internal sealed class BridgeStatus
     public BridgeSessionState? Session { get; set; }
 
     public long? ConsoleLength { get; set; }
+
+    public bool? WindowVisible { get; set; }
 }
 
 internal sealed class BridgeSessionState
@@ -965,4 +1069,6 @@ internal sealed class LaunchResult
     public required string PipePath { get; init; }
 
     public required string WinDbgPath { get; init; }
+
+    public bool? Headless { get; init; }
 }
