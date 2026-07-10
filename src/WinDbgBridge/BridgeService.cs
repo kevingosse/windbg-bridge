@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel.Composition;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Net;
@@ -11,9 +12,11 @@ using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using System.Windows;
 using DbgX.Interfaces;
+using DbgX.Interfaces.Enums;
 using DbgX.Interfaces.Events;
 using DbgX.Interfaces.Listeners;
 using DbgX.Interfaces.Services;
+using DbgX.Interfaces.Structs;
 using DbgX.Util;
 
 namespace WinDbgBridge;
@@ -25,6 +28,8 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 {
     private const int MaxLogEntries = 200;
     private const int MaxHistoryEntries = 100;
+    private const int MaxConsoleChars = 2_000_000;
+    private const int TrimmedConsoleChars = 1_500_000;
     private const string BridgeNotRunningError = "The bridge is not running.";
     private const string BridgeNotStartedUserMessage = "WinDbg bridge is not started. Run !startbridge first.";
     private const string NamedPipePathPrefix = @"\\.\pipe\";
@@ -58,6 +63,17 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     [Import]
     private IDbgEventBus _eventBus = null!;
 
+    [Import(AllowDefault = true)]
+    private IDbgTargetState? _targetState = null;
+
+    [Import(AllowDefault = true)]
+    private IDbgTargetControl? _targetControl = null;
+
+    [Import(AllowDefault = true)]
+    private IDbgEngineState? _engineState = null;
+
+    private readonly StringBuilder _consoleLog = new();
+    private long _consoleTrimmedChars;
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _listenerTask;
     private CapturedCommand? _activeCommand;
@@ -383,8 +399,24 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         };
     }
 
-    private BridgeStatus BuildStatusSnapshot()
+    private async Task<BridgeStatus> BuildStatusSnapshotAsync()
     {
+        BridgeSessionState session = ReadSessionState();
+
+        if (string.Equals(session.RunningState, nameof(RunningState.Stopped), StringComparison.Ordinal))
+        {
+            try
+            {
+                string prompt = await InvokeOnUiThreadAsync(() => _console.GetPromptTextAsync())
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                session.Prompt = string.IsNullOrWhiteSpace(prompt) ? null : prompt.Trim();
+            }
+            catch
+            {
+                // The prompt is decoration; never let it block or fail a status request.
+            }
+        }
+
         lock (_sync)
         {
             return new BridgeStatus
@@ -394,8 +426,80 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 PipePath = PipePath,
                 ActiveConnectionCount = _activeConnectionCount,
                 HistoryCount = _history.Count,
-                LastRequestAt = _lastRequestAt
+                LastRequestAt = _lastRequestAt,
+                Session = session,
+                ConsoleLength = _consoleTrimmedChars + _consoleLog.Length
             };
+        }
+    }
+
+    private BridgeSessionState ReadSessionState()
+    {
+        BridgeSessionState session = new();
+
+        // These services can be missing (AllowDefault) and their properties are engine-backed,
+        // so read defensively instead of failing the whole request.
+        try
+        {
+            session.RunningState = _targetState?.RunningState.ToString();
+            session.TargetType = _targetState?.TargetType.ToString();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            session.ConnectionState = _engineState?.ConnectionState.ToString();
+        }
+        catch
+        {
+        }
+
+        return session;
+    }
+
+    private RunningState? TryGetRunningState()
+    {
+        try
+        {
+            return _targetState?.RunningState;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> WaitForTargetBreakAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        while (TryGetRunningState() == RunningState.Running)
+        {
+            if (stopwatch.Elapsed >= timeout)
+            {
+                return false;
+            }
+
+            await Task.Delay(200, cancellationToken);
+        }
+
+        return true;
+    }
+
+    private void AppendConsoleLocked(string text)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        _consoleLog.Append(text);
+        if (_consoleLog.Length > MaxConsoleChars)
+        {
+            int removeCount = _consoleLog.Length - TrimmedConsoleChars;
+            _consoleLog.Remove(0, removeCount);
+            _consoleTrimmedChars += removeCount;
         }
     }
 
@@ -493,6 +597,16 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         }
 
         await await dispatcher.InvokeAsync(action);
+    }
+
+    private async Task<T> InvokeOnUiThreadAsync<T>(Func<Task<T>> action)
+    {
+        if (Application.Current?.Dispatcher is not { } dispatcher || dispatcher.CheckAccess())
+        {
+            return await action();
+        }
+
+        return await await dispatcher.InvokeAsync(action);
     }
 
     private void InvokeOnUiThread(Action action)
@@ -624,9 +738,14 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         CapturedCommand? completedCommand;
         ChannelWriter<string>? outputWriter = null;
         string? outputChunk = null;
+        string consoleChunk = StripDml(args.Dml);
 
         lock (_sync)
         {
+            // The console log captures everything, including output produced while no
+            // command is active (breakpoint command strings, module loads, exceptions).
+            AppendConsoleLocked(consoleChunk);
+
             if (_activeCommand is null)
             {
                 return;
@@ -780,8 +899,98 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 {
                     Success = true,
                     Command = command,
-                    Status = BuildStatusSnapshot()
+                    Status = await BuildStatusSnapshotAsync()
                 };
+
+            case "break":
+            {
+                if (_targetControl is not { } targetControl)
+                {
+                    return BuildErrorResponse(command, "The break command is unavailable: the debugger target control service was not found.");
+                }
+
+                RunningState? stateBeforeBreak = TryGetRunningState();
+                if (stateBeforeBreak == RunningState.NoTarget)
+                {
+                    return BuildErrorResponse(command, "Cannot break: no debugging session is active.");
+                }
+
+                if (stateBeforeBreak == RunningState.Running)
+                {
+                    AddLog("Agent requested a target break-in.");
+                    await InvokeOnUiThreadAsync(() => targetControl.BreakAsync());
+
+                    int breakTimeoutSeconds = Math.Clamp(request.Seconds ?? 10, 1, 300);
+                    if (!await WaitForTargetBreakAsync(TimeSpan.FromSeconds(breakTimeoutSeconds), cancellationToken))
+                    {
+                        return BuildErrorResponse(command, $"Break was requested but the target is still running after {breakTimeoutSeconds} seconds.");
+                    }
+                }
+
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Status = await BuildStatusSnapshotAsync()
+                };
+            }
+
+            case "wait":
+            {
+                int waitSeconds = Math.Clamp(request.Seconds ?? 300, 1, 3600);
+                await WaitForTargetBreakAsync(TimeSpan.FromSeconds(waitSeconds), cancellationToken);
+
+                // Returns success even if the target is still running; the caller inspects
+                // status.session.runningState to distinguish break-in from timeout.
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Status = await BuildStatusSnapshotAsync()
+                };
+            }
+
+            case "console":
+            {
+                string consoleText;
+                long trimmedChars;
+
+                lock (_sync)
+                {
+                    consoleText = _consoleLog.ToString();
+                    trimmedChars = _consoleTrimmedChars;
+                }
+
+                long totalLength = trimmedChars + consoleText.Length;
+                long effectiveStart = trimmedChars;
+                bool clippedStart = false;
+
+                if (request.Since is long since)
+                {
+                    long relativeStart = since - trimmedChars;
+                    if (relativeStart < 0)
+                    {
+                        relativeStart = 0;
+                        clippedStart = true;
+                    }
+
+                    relativeStart = Math.Min(relativeStart, consoleText.Length);
+                    consoleText = consoleText[(int)relativeStart..];
+                    effectiveStart = trimmedChars + relativeStart;
+                }
+
+                bool tailSlice = request.Tail == true;
+                OutputSlice consoleSlice = SliceOutput(consoleText, request.MaxChars, tailSlice);
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Output = consoleSlice.Text,
+                    TotalLength = totalLength,
+                    NextOffset = tailSlice ? totalLength : effectiveStart + consoleSlice.Text.Length,
+                    Truncated = consoleSlice.WasTruncated || clippedStart
+                };
+            }
 
             case "history":
                 return new BridgeResponse
@@ -830,6 +1039,13 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     return BuildErrorResponse(command, "The execute command requires text.");
                 }
 
+                if (TryGetRunningState() == RunningState.Running)
+                {
+                    return BuildErrorResponse(
+                        command,
+                        "The target is running, so the command was not submitted. Use 'break' to interrupt the target, or 'wait' until it breaks in, then retry. Use 'console' to read output produced while it runs.");
+                }
+
                 bool streamOutput = request.Stream == true;
                 PendingAgentCommand pendingCommand = new(request.Text, streamOutput);
 
@@ -872,7 +1088,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 }
 
             default:
-                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, history, or output.");
+                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, break, wait, console, history, or output.");
         }
     }
 
@@ -1219,6 +1435,10 @@ internal sealed class BridgeRequest
     public bool? Tail { get; set; }
 
     public bool? Stream { get; set; }
+
+    public long? Since { get; set; }
+
+    public int? Seconds { get; set; }
 }
 
 internal sealed class BridgeResponse
@@ -1239,7 +1459,9 @@ internal sealed class BridgeResponse
 
     public bool? Truncated { get; init; }
 
-    public int? TotalLength { get; init; }
+    public long? TotalLength { get; init; }
+
+    public long? NextOffset { get; init; }
 
     public string? Event { get; init; }
 }
@@ -1257,6 +1479,21 @@ internal sealed class BridgeStatus
     public int HistoryCount { get; init; }
 
     public DateTimeOffset? LastRequestAt { get; init; }
+
+    public BridgeSessionState? Session { get; init; }
+
+    public long ConsoleLength { get; init; }
+}
+
+internal sealed class BridgeSessionState
+{
+    public string? TargetType { get; set; }
+
+    public string? RunningState { get; set; }
+
+    public string? ConnectionState { get; set; }
+
+    public string? Prompt { get; set; }
 }
 
 internal sealed class BridgeHistorySummary
