@@ -34,6 +34,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     private const string BridgeNotRunningError = "The bridge is not running.";
     private const string BridgeNotStartedUserMessage = "WinDbg bridge is not started. Run !startbridge first.";
     private const string NamedPipePathPrefix = @"\\.\pipe\";
+    private const string BridgePipeEnvironmentVariable = "WINDBG_BRIDGE_PIPE";
 
     private static readonly Regex StartupBridgeArgumentRegex = new(
         @"(?:^|;)\s*bridgearg(?:\s+(?<value>[^;]*?))?\s*(?:;|$)",
@@ -273,7 +274,11 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         _eventBus.Subscribe<DmlOutputEventArgs>(OnDmlOutput);
         AddLog("Bridge command capture initialized.");
         TryCaptureStartupCommandArgumentFromCommandLine();
-        TryStartBridgeFromCommandLine();
+
+        if (!TryStartBridgeFromEnvironment())
+        {
+            TryStartBridgeFromCommandLine();
+        }
     }
 
     public void StopBridge()
@@ -708,6 +713,21 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         {
             SetStartupCommandArgument(value, "command line");
         }
+    }
+
+    // WinDbg fails to create a debug session when a UI client command such as
+    // `bridgestart` is passed through `-c` alongside a target, so the launcher hands
+    // the pipe name over through the environment instead.
+    private bool TryStartBridgeFromEnvironment()
+    {
+        string? pipeName = Environment.GetEnvironmentVariable(BridgePipeEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(pipeName))
+        {
+            return false;
+        }
+
+        StartBridgeFromRequestedPipe(pipeName, BridgePipeEnvironmentVariable);
+        return true;
     }
 
     private void TryStartBridgeFromCommandLine()

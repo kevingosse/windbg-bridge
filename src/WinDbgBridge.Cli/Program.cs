@@ -14,6 +14,7 @@ internal static class Program
     private const string NamedPipePathPrefix = @"\\.\pipe\";
     private const string WinDbgPackageName = "Microsoft.WinDbg";
     private const string WinDbgAliasName = "WinDbgX.exe";
+    private const string BridgePipeEnvironmentVariable = "WINDBG_BRIDGE_PIPE";
     private const int DefaultLaunchTimeoutSeconds = 30;
 
     private static readonly Regex PipeNameRegex = new("^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$", RegexOptions.Compiled);
@@ -111,18 +112,19 @@ internal static class Program
         ValidatePipeName(pipeName);
 
         string winDbgPath = ResolveWinDbgExecutablePath(options.WinDbgPath);
-        IReadOnlyList<string> winDbgArguments = BuildWinDbgArguments(options.WinDbgArguments, pipeName);
+        IReadOnlyList<string> winDbgArguments = options.WinDbgArguments;
 
         if (options.Verbose)
         {
             Console.Error.WriteLine("Launching WinDbg from " + winDbgPath);
+            Console.Error.WriteLine($"Bridge pipe passed as {BridgePipeEnvironmentVariable}={pipeName}");
             if (winDbgArguments.Count > 0)
             {
                 Console.Error.WriteLine("WinDbg arguments: " + string.Join(" ", winDbgArguments.Select(QuoteArgumentForDisplay)));
             }
         }
 
-        using Process process = StartWinDbg(winDbgPath, winDbgArguments);
+        using Process process = StartWinDbg(winDbgPath, winDbgArguments, pipeName);
 
         using (WindowHider? windowHider = options.Headless ? WindowHider.Start(process.Id) : null)
         {
@@ -152,59 +154,6 @@ internal static class Program
     private static string CreatePipeName()
     {
         return $"windbg-bridge-{Environment.ProcessId}-{Guid.NewGuid():N}";
-    }
-
-    private static IReadOnlyList<string> BuildWinDbgArguments(IReadOnlyList<string> userArguments, string pipeName)
-    {
-        List<string> arguments = new(userArguments);
-        string bridgeCommand = "bridgestart " + pipeName;
-
-        int commandIndex = FindWinDbgOptionIndex(arguments, "-c", "/c");
-        if (commandIndex >= 0)
-        {
-            if (commandIndex + 1 >= arguments.Count)
-            {
-                throw new InvalidOperationException("WinDbg -c requires a command string.");
-            }
-
-            string existingCommand = arguments[commandIndex + 1];
-            arguments[commandIndex + 1] = string.IsNullOrWhiteSpace(existingCommand)
-                ? bridgeCommand
-                : bridgeCommand + "; " + existingCommand;
-            return arguments;
-        }
-
-        int insertIndex = GetWinDbgCommandInsertIndex(arguments);
-        arguments.Insert(insertIndex, "-c");
-        arguments.Insert(insertIndex + 1, bridgeCommand);
-        return arguments;
-    }
-
-    private static int FindWinDbgOptionIndex(IReadOnlyList<string> arguments, params string[] optionNames)
-    {
-        for (int i = 0; i < arguments.Count; i++)
-        {
-            if (optionNames.Any(optionName => string.Equals(arguments[i], optionName, StringComparison.OrdinalIgnoreCase)))
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    private static int GetWinDbgCommandInsertIndex(IReadOnlyList<string> arguments)
-    {
-        if (arguments.Count >= 2 &&
-            (string.Equals(arguments[0], "-server", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "/server", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "-remote", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(arguments[0], "/remote", StringComparison.OrdinalIgnoreCase)))
-        {
-            return 2;
-        }
-
-        return 0;
     }
 
     private static string ResolveWinDbgExecutablePath(string? explicitPath)
@@ -261,13 +210,24 @@ internal static class Program
         return string.IsNullOrWhiteSpace(output) ? null : output;
     }
 
-    private static Process StartWinDbg(string winDbgPath, IReadOnlyList<string> arguments)
+    private static Process StartWinDbg(string winDbgPath, IReadOnlyList<string> arguments, string pipeName)
     {
+        // The extension reads the pipe name from the environment, which a shell-executed
+        // child inherits from us. Passing `bridgestart` through WinDbg's `-c` instead makes
+        // WinDbg pop an "Unable to create a debug session" dialog whenever a target is
+        // specified on the same command line.
+        Environment.SetEnvironmentVariable(BridgePipeEnvironmentVariable, pipeName);
+
         ProcessStartInfo startInfo = new()
         {
             FileName = winDbgPath,
-            UseShellExecute = false,
-            WorkingDirectory = Environment.CurrentDirectory
+            WorkingDirectory = Environment.CurrentDirectory,
+
+            // WinDbg and its debuggee outlive this process. Launching them without shell
+            // execute would leak our standard handles into both, so a caller capturing the
+            // launch JSON (`$json = windbg-bridge launch`) would block until the debuggee
+            // exits, waiting for a stdout pipe that nobody closes.
+            UseShellExecute = true
         };
 
         foreach (string argument in arguments)
@@ -904,7 +864,7 @@ internal static class Program
                     case "-h":
                         throw new InvalidOperationException(
                             "Usage: windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--headless] [--verbose] [-- <WinDbg args>]\n" +
-                            "Launches WinDbg, injects `bridgestart <pipe-name>`, waits for the bridge to become ready, and prints launch metadata as JSON.\n" +
+                            "Launches WinDbg with WINDBG_BRIDGE_PIPE=<pipe-name> in its environment, waits for the bridge to become ready, and prints launch metadata as JSON.\n" +
                             "--headless hides the WinDbg window so the session does not disturb anyone at the desktop; use the `show` command to reveal it later.\n" +
                             "Examples:\n" +
                             "  windbg-bridge.exe launch\n" +

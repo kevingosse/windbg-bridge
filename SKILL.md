@@ -18,7 +18,7 @@ With the bridge active, you can:
 ## Bridge workflow
 
 1. Make sure the WinDbg extension is installed.
-2. If WinDbg is not already running with the bridge enabled, launch it with the bridge CLI:
+2. If WinDbg is not already running with the bridge enabled, launch it with the bridge CLI (add `--headless` to keep the window hidden):
    - `%LOCALAPPDATA%\DBG\UIExtensions\windbg-bridge\windbg-bridge.exe launch [-- <optional WinDbg args>]`
 3. Obtain the pipe name from the WinDbg bridge panel, or reuse the `pipeName` returned by `launch`.
 4. Use the CLI to talk to the pipe:
@@ -33,7 +33,7 @@ With the bridge active, you can:
 
 ### Launch WinDbg and auto-enable the bridge
 
-Use the bridge CLI when you want the agent to launch WinDbg on its own. It resolves the Store-installed WinDbg location, injects `bridgestart <pipe-name>`, waits for the bridge to come up, and prints JSON with `pipeName`, `pipePath`, `processId`, and `winDbgPath`.
+Use the bridge CLI when you want the agent to launch WinDbg on its own. It resolves the Store-installed WinDbg location, passes the pipe name through the `WINDBG_BRIDGE_PIPE` environment variable, waits for the bridge to come up, and prints JSON with `pipeName`, `pipePath`, `processId`, and `winDbgPath`.
 
 ```powershell
 windbg-bridge.exe launch
@@ -59,7 +59,7 @@ windbg-bridge.exe launch --headless -- -z C:\dumps\app.dmp
 
 The session behaves exactly the same; only the window is hidden. Use the `show` command to reveal it when handing the session over to a human.
 
-Use the bare pipe name, for example `windbg-bridge-demo`. Use only letters, digits, `.`, `_`, and `-`. If you pass a WinDbg `-c` argument, the CLI prepends `bridgestart <pipe-name>` to it automatically.
+Use the bare pipe name, for example `windbg-bridge-demo`. Use only letters, digits, `.`, `_`, and `-`. Arguments after `--` are forwarded to WinDbg untouched.
 
 Inside WinDbg, the user can also manage the bridge directly:
 
