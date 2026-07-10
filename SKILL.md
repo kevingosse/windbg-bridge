@@ -65,7 +65,7 @@ Inside WinDbg, the user can also manage the bridge directly:
 
 ### Status
 
-Use this first to confirm the bridge is live. It never touches the engine, so it is always safe to call — even while the target is running.
+Use this first to confirm the bridge is live. It is always safe to call — even while the target is running: the state fields are read from cached debugger properties, and the prompt query (the only part that goes through the console service) is skipped while the target runs and bounded by a 1-second timeout.
 
 ```powershell
 windbg-bridge.exe --pipe windbg-bridge-123 status
@@ -77,6 +77,8 @@ The response includes a `session` object describing the debugger state:
 - `targetType` — e.g. `LiveUser`, `DumpUser`, `NoTarget`.
 - `connectionState` — e.g. `NoSession`, `LocalDebugging`.
 - `prompt` — the current WinDbg prompt (e.g. `0:001>`) when the target is broken in; tells you the current process/thread.
+
+Any of these fields can be `null` if the corresponding debugger service is unavailable or its state cannot be read. Treat `null` as "unknown", not as "not running" — in that rare case `wait` returns promptly instead of blocking, and `break` still attempts the break-in.
 
 It also reports `consoleLength`, the total number of characters captured in the console transcript (see `console` below).
 

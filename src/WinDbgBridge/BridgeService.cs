@@ -473,6 +473,9 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
 
     private async Task<bool> WaitForTargetBreakAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
+        // An unreadable state (null) exits the loop immediately: spinning until timeout
+        // on a state that can never be observed would only stall the caller. The status
+        // returned to the client carries the null runningState so it can tell.
         Stopwatch stopwatch = Stopwatch.StartNew();
         while (TryGetRunningState() == RunningState.Running)
         {
@@ -915,7 +918,10 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     return BuildErrorResponse(command, "Cannot break: no debugging session is active.");
                 }
 
-                if (stateBeforeBreak == RunningState.Running)
+                // A null state (state service missing or unreadable) still attempts the
+                // break-in: claiming success without acting would mislead the caller, and
+                // BreakAsync is harmless on a target that is already broken in.
+                if (stateBeforeBreak != RunningState.Stopped)
                 {
                     AddLog("Agent requested a target break-in.");
                     await InvokeOnUiThreadAsync(() => targetControl.BreakAsync());
