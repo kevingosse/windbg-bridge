@@ -51,6 +51,14 @@ Launch and forward extra WinDbg arguments after `--`:
 windbg-bridge.exe launch -- -z C:\dumps\app.dmp
 ```
 
+When you are working autonomously and no human needs to watch the session, add `--headless` to keep the WinDbg window hidden so it does not disturb anyone at the desktop:
+
+```powershell
+windbg-bridge.exe launch --headless -- -z C:\dumps\app.dmp
+```
+
+The session behaves exactly the same; only the window is hidden. Use the `show` command to reveal it when handing the session over to a human.
+
 Use the bare pipe name, for example `windbg-bridge-demo`. Use only letters, digits, `.`, `_`, and `-`. If you pass a WinDbg `-c` argument, the CLI prepends `bridgestart <pipe-name>` to it automatically.
 
 Inside WinDbg, the user can also manage the bridge directly:
@@ -80,7 +88,7 @@ The response includes a `session` object describing the debugger state:
 
 Any of these fields can be `null` if the corresponding debugger service is unavailable or its state cannot be read. Treat `null` as "unknown", not as "not running" — in that rare case `wait` returns promptly instead of blocking, and `break` still attempts the break-in.
 
-It also reports `consoleLength`, the total number of characters captured in the console transcript (see `console` below).
+It also reports `consoleLength`, the total number of characters captured in the console transcript (see `console` below), and `windowVisible`, whether the WinDbg window is currently visible on the desktop (see `hide`/`show` below).
 
 ### History
 
@@ -182,6 +190,17 @@ windbg-bridge.exe --pipe P break
 
 Or, if you expect a real (non-continuing) breakpoint to hit, replace step 4 with `wait`.
 
+### Hide / Show
+
+`hide` hides the WinDbg window; `show` brings it back (restoring it if minimized). The debugging session is unaffected — only the window's visibility changes. Both return the status snapshot, whose `windowVisible` field confirms the result, and both are no-ops when already in the requested state.
+
+```powershell
+windbg-bridge.exe --pipe windbg-bridge-123 hide
+windbg-bridge.exe --pipe windbg-bridge-123 show
+```
+
+Use `hide` when working autonomously so the WinDbg window does not disturb anyone at the desktop (or launch with `--headless` to start hidden), and `show` when handing the session over to a human.
+
 ### Listen
 
 `listen` blocks until the WinDbg user queues a prompt with `ask` or `!ask`, then prints that prompt to stdout and exits.
@@ -217,6 +236,7 @@ The user will probably ask you about what they're currently seeing in Windbg, so
 3. Keep output requests bounded when exploring large dumps or verbose commands.
 4. Treat `NoSession` as a debugger-state issue, not a transport failure.
 5. Never wait for a human to click **Break** — use the `break` command to interrupt a running target yourself.
-6. Run `listen` as a background or monitored command instead of waiting synchronously in the foreground.
-7. After `listen` completes, read the queued prompt from stdout, respond, and immediately launch `listen` again.
-8. If history already contains the command you need, prefer reading its output over rerunning it.
+6. When working autonomously (no human watching the session), launch with `--headless` or use `hide` so the WinDbg window does not disturb anyone; `show` it again when handing over.
+7. Run `listen` as a background or monitored command instead of waiting synchronously in the foreground.
+8. After `listen` completes, read the queued prompt from stdout, respond, and immediately launch `listen` again.
+9. If history already contains the command you need, prefer reading its output over rerunning it.

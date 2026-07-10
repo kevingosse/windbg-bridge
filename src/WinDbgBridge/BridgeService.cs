@@ -11,6 +11,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using System.Windows;
+using System.Windows.Interop;
 using DbgX.Interfaces;
 using DbgX.Interfaces.Enums;
 using DbgX.Interfaces.Events;
@@ -73,6 +74,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
     private IDbgEngineState? _engineState = null;
 
     private readonly StringBuilder _consoleLog = new();
+    private readonly List<Window> _windowsHiddenByBridge = new(); // UI thread only
     private long _consoleTrimmedChars;
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _listenerTask;
@@ -417,6 +419,22 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
             }
         }
 
+        bool? windowVisible = null;
+        try
+        {
+            InvokeOnUiThread(() =>
+            {
+                if (Application.Current?.MainWindow is { } mainWindow)
+                {
+                    windowVisible = IsWindowHandleVisible(mainWindow);
+                }
+            });
+        }
+        catch
+        {
+            // Window visibility is decoration; never let it fail a status request.
+        }
+
         lock (_sync)
         {
             return new BridgeStatus
@@ -428,9 +446,70 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 HistoryCount = _history.Count,
                 LastRequestAt = _lastRequestAt,
                 Session = session,
-                ConsoleLength = _consoleTrimmedChars + _consoleLog.Length
+                ConsoleLength = _consoleTrimmedChars + _consoleLog.Length,
+                WindowVisible = windowVisible
             };
         }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+
+    // Visibility is checked at the HWND level rather than through WPF's Visibility
+    // property: a headless launch hides the windows through Win32 before the bridge
+    // is ready, which WPF does not observe.
+    private static bool IsWindowHandleVisible(Window window)
+    {
+        IntPtr handle = new WindowInteropHelper(window).Handle;
+        return handle != IntPtr.Zero && IsWindowVisible(handle);
+    }
+
+    // Runs on the UI thread.
+    private void HideWinDbgWindows()
+    {
+        foreach (Window window in Application.Current.Windows.OfType<Window>())
+        {
+            if (IsWindowHandleVisible(window))
+            {
+                if (!_windowsHiddenByBridge.Contains(window))
+                {
+                    _windowsHiddenByBridge.Add(window);
+                }
+
+                window.Hide();
+            }
+        }
+    }
+
+    // Runs on the UI thread.
+    private void ShowWinDbgWindows()
+    {
+        List<Window> windowsToShow = new(_windowsHiddenByBridge);
+        _windowsHiddenByBridge.Clear();
+
+        if (Application.Current.MainWindow is { } mainWindow && !windowsToShow.Contains(mainWindow))
+        {
+            windowsToShow.Add(mainWindow);
+        }
+
+        foreach (Window window in windowsToShow)
+        {
+            if (window.IsVisible && !IsWindowHandleVisible(window))
+            {
+                // The HWND was hidden externally (headless launch) while WPF still
+                // believes the window is visible; toggle through Hidden so Show()
+                // actually re-shows it.
+                window.Hide();
+            }
+
+            window.Show();
+            if (window.WindowState == WindowState.Minimized)
+            {
+                window.WindowState = WindowState.Normal;
+            }
+        }
+
+        Application.Current.MainWindow?.Activate();
     }
 
     private BridgeSessionState ReadSessionState()
@@ -956,6 +1035,34 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 };
             }
 
+            case "hide":
+            case "show":
+            {
+                if (Application.Current is null)
+                {
+                    return BuildErrorResponse(command, "The WinDbg window cannot be controlled: no WPF application is available.");
+                }
+
+                bool hideWindow = string.Equals(command, "hide", StringComparison.Ordinal);
+                AddLog(hideWindow ? "Agent requested to hide the WinDbg window." : "Agent requested to show the WinDbg window.");
+
+                try
+                {
+                    InvokeOnUiThread(hideWindow ? HideWinDbgWindows : ShowWinDbgWindows);
+                }
+                catch (Exception ex)
+                {
+                    return BuildErrorResponse(command, "The WinDbg window could not be " + (hideWindow ? "hidden" : "shown") + ": " + ex.Message);
+                }
+
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command,
+                    Status = await BuildStatusSnapshotAsync()
+                };
+            }
+
             case "console":
             {
                 string consoleText;
@@ -1094,7 +1201,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 }
 
             default:
-                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, break, wait, console, history, or output.");
+                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, break, wait, console, history, output, hide, or show.");
         }
     }
 
@@ -1489,6 +1596,8 @@ internal sealed class BridgeStatus
     public BridgeSessionState? Session { get; init; }
 
     public long ConsoleLength { get; init; }
+
+    public bool? WindowVisible { get; init; }
 }
 
 internal sealed class BridgeSessionState
