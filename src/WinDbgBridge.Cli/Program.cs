@@ -544,6 +544,7 @@ internal static class Program
             long? id = null;
             int? maxChars = null;
             bool tail = false;
+            bool readTextFromStdin = false;
             int? timeoutSeconds = null;
             long? since = null;
             int? seconds = null;
@@ -607,6 +608,10 @@ internal static class Program
                         tail = true;
                         break;
 
+                    case "--stdin":
+                        readTextFromStdin = true;
+                        break;
+
                     case "--since":
                         if (i + 1 >= args.Length || !long.TryParse(args[++i], out long parsedSince) || parsedSince < 0)
                         {
@@ -632,8 +637,10 @@ internal static class Program
                             "Usage:\n" +
                             "  windbg-bridge.exe --pipe <pipe-name-or-path> [--timeout <seconds>] [--verbose] <command> [arguments]\n" +
                             "  windbg-bridge.exe launch [--pipe <pipe-name-or-path>] [--timeout <seconds>] [--windbg <path>] [--verbose] [-- <WinDbg args>]\n" +
-                            "Commands: status, listen, execute, break, wait, console, history, output\n" +
+                            "Commands: status, listen, reply, execute, break, wait, console, history, output\n" +
                             "  status   Bridge and debugger state (session.runningState tells you if the target is running).\n" +
+                            "  reply    Print text into the WinDbg console as an agent message. Works while the target is\n" +
+                            "           running. Use --stdin to read the text from standard input (multi-line, no quoting).\n" +
                             "  execute  Send one WinDbg command. Rejected while the target is running; use break or wait first.\n" +
                             "  break    Force a running target to break in (--seconds <n> bounds the wait, default 10).\n" +
                             "  wait     Block until the target breaks in (--seconds <n> bounds the wait, default 300). Check\n" +
@@ -646,6 +653,7 @@ internal static class Program
                             "Examples:\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 status\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 listen\n" +
+                            "  windbg-bridge.exe --pipe windbg-bridge-123 reply \"Thread 12 is waiting on the lock held by thread 3.\"\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 execute !clrstack\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 execute g\n" +
                             "  windbg-bridge.exe --pipe windbg-bridge-123 wait --seconds 60\n" +
@@ -676,7 +684,7 @@ internal static class Program
 
             if (positional.Count == 0)
             {
-                throw new InvalidOperationException("A bridge command is required. Use status, listen, execute, history, or output.");
+                throw new InvalidOperationException("A bridge command is required. Use status, listen, reply, execute, break, wait, console, history, or output.");
             }
 
             string operation = positional[0].Trim().ToLowerInvariant();
@@ -733,6 +741,32 @@ internal static class Program
                     text = string.Join(" ", positional.Skip(1));
                     break;
 
+                case "reply":
+                    if (readTextFromStdin)
+                    {
+                        if (positional.Count > 1)
+                        {
+                            throw new InvalidOperationException("reply --stdin does not accept positional text.");
+                        }
+
+                        text = Console.In.ReadToEnd();
+                    }
+                    else
+                    {
+                        if (positional.Count < 2)
+                        {
+                            throw new InvalidOperationException("reply requires the text to print, or --stdin to read it from standard input.");
+                        }
+
+                        text = string.Join(" ", positional.Skip(1));
+                    }
+
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        throw new InvalidOperationException("reply requires non-empty text.");
+                    }
+                    break;
+
                 case "output":
                     if (positional.Count > 1)
                     {
@@ -746,7 +780,7 @@ internal static class Program
                     break;
 
                 default:
-                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, execute, break, wait, console, history, or output.");
+                    throw new InvalidOperationException("Unknown bridge command. Use status, listen, reply, execute, break, wait, console, history, or output.");
             }
 
             return new BridgeClientOptions

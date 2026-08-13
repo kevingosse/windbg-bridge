@@ -1039,6 +1039,20 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                     Output = prompt
                 };
 
+            case "reply":
+                if (string.IsNullOrWhiteSpace(request.Text))
+                {
+                    return BuildErrorResponse(command, "The reply command requires text.");
+                }
+
+                WriteAgentReplyToConsole(request.Text);
+                AddLog("Agent reply: " + SummarizeForLog(request.Text));
+                return new BridgeResponse
+                {
+                    Success = true,
+                    Command = command
+                };
+
             case "execute":
                 if (string.IsNullOrWhiteSpace(request.Text))
                 {
@@ -1094,7 +1108,7 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
                 }
 
             default:
-                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, execute, break, wait, console, history, or output.");
+                return BuildErrorResponse(command, "Unknown bridge command: " + request.Command + ". Use status, listen, reply, execute, break, wait, console, history, or output.");
         }
     }
 
@@ -1371,6 +1385,19 @@ public sealed class BridgeService : BindableBase, IDbgStartupListener, IDbgShutd
         return text.Length <= MaxLength
             ? text
             : text[..(MaxLength - 3)] + "...";
+    }
+
+    private void WriteAgentReplyToConsole(string text)
+    {
+        string normalized = text.Replace("\r\n", "\n").Trim().Replace("\n", Environment.NewLine);
+        string message =
+            "---- agent ------------------------------------" + Environment.NewLine +
+            normalized + Environment.NewLine +
+            "-----------------------------------------------" + Environment.NewLine;
+
+        // PrintTextToConsole writes straight to the console view without going through
+        // the command interpreter, so replies are delivered even while the target runs.
+        InvokeOnUiThread(() => _console.PrintTextToConsole(message, isCompleteCommand: false));
     }
 
     private void WriteInteractiveCommandMessage(string message)

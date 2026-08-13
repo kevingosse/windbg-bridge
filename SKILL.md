@@ -13,6 +13,7 @@ With the bridge active, you can:
 - **Execute WinDbg commands** — they appear in the WinDbg UI so the user sees what you're doing
 - **Read the user's command history** — see what the user ran manually, including output
 - **Wait for user prompts** — block on `listen` until the user queues the next prompt from WinDbg
+- **Answer inside WinDbg** — `reply` prints your answer into the WinDbg console, so the conversation stays where the user is
 - **Collaborate in real time** — you and the user share the same debugging session
 
 ## Bridge workflow
@@ -24,7 +25,7 @@ With the bridge active, you can:
 4. Use the CLI to talk to the pipe:
    - `%LOCALAPPDATA%\DBG\UIExtensions\windbg-bridge\windbg-bridge.exe`
 5. Start with `status` to confirm the bridge is running and to see the debugger state (`session.runningState` tells you whether the target is running, broken in, or absent).
-6. Launch an instance _in the background_ with the `listen` option. It will block until the WinDbg user queues a prompt with `ask ...` or `!ask ...`. It allows the user to communicate with you directly from Windbg.
+6. Launch an instance _in the background_ with the `listen` option. It will block until the WinDbg user queues a prompt with `ask ...` or `!ask ...`. It allows the user to communicate with you directly from Windbg. Answer every `ask` prompt with `reply` so the user sees it in WinDbg, not just in your terminal.
 7. Use `history` for lightweight command discovery.
 8. Use `output` to retrieve the captured output for a specific history id, optionally capped with `--max-chars`.
 9. Use `execute` to send exactly one WinDbg command per CLI invocation.
@@ -190,7 +191,7 @@ Or, if you expect a real (non-continuing) breakpoint to hit, replace step 4 with
 windbg-bridge.exe --pipe windbg-bridge-123 listen
 ```
 
-For agent-driven workflows, start `listen` as a background or monitored command and let it keep running until the user submits the next prompt. When it completes, read stdout, respond to the user, then launch `listen` again for the next turn.
+For agent-driven workflows, start `listen` as a background or monitored command and let it keep running until the user submits the next prompt. When it completes, read stdout, answer with `reply`, then launch `listen` again for the next turn.
 
 In WinDbg, queue the next prompt with either of these:
 
@@ -200,6 +201,26 @@ ask why is this thread deadlocked
 ```
 
 The user will probably ask you about what they're currently seeing in Windbg, so it's good practice to check the history to get the context on what the user is asking.
+
+### Reply
+
+`reply` prints text into the WinDbg console, framed as an agent message. The user asked their question from WinDbg with `ask`, so deliver the answer there too — never leave it only in your own terminal. Keep the console answer concise; lengthy detail can stay on your side.
+
+```powershell
+windbg-bridge.exe --pipe windbg-bridge-123 reply "Thread 12 is waiting on the lock held by thread 3."
+```
+
+For multi-line answers, pass the text on standard input with `--stdin` — no quoting or escaping issues:
+
+```powershell
+@'
+Thread 12 is deadlocked:
+- It holds lock A and waits for lock B.
+- Thread 3 holds lock B and waits for lock A.
+'@ | windbg-bridge.exe --pipe windbg-bridge-123 reply --stdin
+```
+
+Unlike `execute`, `reply` does not go through the command interpreter: it works even while the target is running, and it does not create a history entry (the text is captured in the `console` transcript).
 
 ## Important behaviors
 
@@ -218,5 +239,5 @@ The user will probably ask you about what they're currently seeing in Windbg, so
 4. Treat `NoSession` as a debugger-state issue, not a transport failure.
 5. Never wait for a human to click **Break** — use the `break` command to interrupt a running target yourself.
 6. Run `listen` as a background or monitored command instead of waiting synchronously in the foreground.
-7. After `listen` completes, read the queued prompt from stdout, respond, and immediately launch `listen` again.
+7. After `listen` completes, read the queued prompt from stdout, answer with `reply`, and immediately launch `listen` again.
 8. If history already contains the command you need, prefer reading its output over rerunning it.
