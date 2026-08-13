@@ -4,6 +4,8 @@
 
 windbg-bridge connects a live WinDbg session to AI agents like Claude Code or Codex through a named pipe. The agent can run debugger commands, read your command history, and watch output in real time. Everything it does shows up in the WinDbg UI, so you always see exactly what's happening. 
 
+https://github.com/user-attachments/assets/d86cfbd1-8076-457c-a7ee-97e1d9914f6f
+
 ```text
 ┌─────────────┐    named pipe    ┌────────────────────┐
 │   WinDbg    │◄────────────────►│  windbg-bridge.exe │◄──── your AI agent
